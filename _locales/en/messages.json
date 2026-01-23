@@ -1,0 +1,18 @@
+{
+  "extensionName": {
+    "message": "TabReminder",
+    "description": "Name of the extension"
+  },
+  "extensionDescription": {
+    "message": "Remind yourself with notes when revisiting pages and schedule time-based reminders",
+    "description": "Description of the extension"
+  },
+  "browserActionTitle": {
+    "message": "TabReminder",
+    "description": "Title of the browser action button"
+  },
+  "sidebarTitle": {
+    "message": "TabReminder",
+    "description": "Title of the sidebar"
+  }
+}
