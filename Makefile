@@ -9,7 +9,7 @@ ZIP_NAME := $(EXTENSION_NAME)-v$(VERSION).zip
 all: build prepare-manifest package
 
 # Build the extension
-build:
+build: clean
 	@echo "Building extension..."
 	npm run build
 
@@ -53,7 +53,7 @@ mozilla-package: build
 clean:
 	@echo "Cleaning up..."
 	@rm -f $(EXTENSION_NAME)-*.zip
-	@rm -f dist/.gitidentity 2>/dev/null || true
+	@rm -rf dist 2>/dev/null || true
 	@echo "✓ Clean complete"
 
 # Test the extension in Firefox
