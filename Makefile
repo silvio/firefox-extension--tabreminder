@@ -92,6 +92,12 @@ info:
 		echo "Package exists: No (run 'make package' to create)"; \
 	fi
 
+# generate sourceode package
+sourcecode-package:
+	@echo "Creating source code package: $(EXTENSION_NAME)-source-v$(VERSION).tar.gz"
+	@git archive --format=tar --prefix=$(EXTENSION_NAME)-source-v$(VERSION)/ HEAD | gzip > $(EXTENSION_NAME)-source-v$(VERSION).tar.gz
+	@echo "✓ Source code package created: $(EXTENSION_NAME)-source-v$(VERSION).tar.gz"
+
 # Install dependencies
 install:
 	npm install

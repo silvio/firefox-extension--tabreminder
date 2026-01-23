@@ -80,4 +80,5 @@ Environment:
 - for firefox package: `make mozilla-package`
 - to build: `make build`
 - setup build environment: `make install`
+- build sourcecode package: `make sourcecode-package`
 
