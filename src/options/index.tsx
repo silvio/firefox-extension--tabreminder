@@ -17,6 +17,7 @@ const SYSTEM_FONTS = [
 
 const TIMEOUT_OPTIONS = [
   { value: 0, label: 'Never (manual close)' },
+  { value: 2000, label: '2 seconds' },
   { value: 5000, label: '5 seconds' },
   { value: 10000, label: '10 seconds' },
   { value: 30000, label: '30 seconds' },
@@ -467,6 +468,73 @@ function Options() {
               </div>
             </div>
           )}
+        </div>
+
+        <button
+          onClick={handleSave}
+          style={{
+            marginTop: '16px',
+            padding: '10px 20px',
+            backgroundColor: saved ? '#4caf50' : '#4a90d9',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+          }}
+        >
+          {saved ? 'Saved!' : 'Save Settings'}
+        </button>
+      </section>
+
+      <section style={{ marginBottom: '30px' }}>
+        <h2 style={{ fontSize: '18px', marginBottom: '16px', borderBottom: '2px solid #ddd', paddingBottom: '8px' }}>
+          General
+        </h2>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={settings.preselectLastCategory}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  preselectLastCategory: e.target.checked,
+                })
+              }
+              style={{ width: '18px', height: '18px' }}
+            />
+            <div>
+              <div style={{ fontWeight: 500 }}>Preselect Last Used Category</div>
+              <div style={{ fontSize: '13px', color: '#666' }}>
+                When creating a new note, preselect the last category you used
+              </div>
+            </div>
+          </label>
+
+          <div>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
+              Popup Window Height:
+            </label>
+            <input
+              type="number"
+              min="400"
+              max="1200"
+              step="50"
+              value={settings.popupHeight}
+              placeholder="600"
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  popupHeight: Number(e.target.value),
+                })
+              }
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '4px' }}
+            />
+            <div style={{ fontSize: '13px', color: '#666', marginTop: '4px' }}>
+              Height of the popup window in pixels (400-1200px, default: 600px)
+            </div>
+          </div>
         </div>
 
         <button

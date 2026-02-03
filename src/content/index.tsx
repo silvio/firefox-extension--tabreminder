@@ -77,7 +77,20 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
           {hasReminders && <span style={{ marginLeft: '8px' }}>⏰</span>}
         </strong>
         <button
-          onClick={onClose}
+          onClick={() => {
+            onClose();
+            // Fallback: ensure overlay is removed even if onClose fails
+            setTimeout(() => {
+              const overlay = document.getElementById('tabreminder-overlay');
+              if (overlay) {
+                try {
+                  overlay.remove();
+                } catch (e) {
+                  console.warn('Error removing overlay:', e);
+                }
+              }
+            }, 100);
+          }}
           style={{
             background: 'none',
             border: 'none',
@@ -100,7 +113,7 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
               padding: '12px 16px',
               borderBottom: index < visibleNotes.length - 1 ? `2px solid ${style.borderColor}40` : 'none',
               borderLeft: catColor ? `4px solid ${catColor}` : 'none',
-              marginLeft: catColor ? '0' : '4px',
+              marginLeft: catColor ? '4px' : '4px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
@@ -235,7 +248,26 @@ const defaultStyle: OverlayStyle = {
   opacity: 1.0,
 };
 
+// Track cleanup timeout to prevent race conditions
+let cleanupTimeout: number | undefined;
+
 function showNotes(notes: PageNote[], categories: Category[], style: OverlayStyle = defaultStyle, hasReminders = false) {
+  // Cancel any pending cleanup
+  if (cleanupTimeout) {
+    clearTimeout(cleanupTimeout);
+    cleanupTimeout = undefined;
+  }
+  
+  // Clean up existing overlay if present
+  if (root && container) {
+    try {
+      root.render(<></>);
+    } catch (e) {
+      console.warn('Error clearing overlay:', e);
+    }
+  }
+  
+  // Create container if needed
   if (!container) {
     container = document.createElement('div');
     container.id = 'tabreminder-overlay';
@@ -248,8 +280,27 @@ function showNotes(notes: PageNote[], categories: Category[], style: OverlayStyl
 
 function hideNote() {
   if (root && container) {
-    root.render(<></>);
+    try {
+      root.render(<></>);
+      root = null;
+    } catch (e) {
+      console.warn('Error clearing overlay:', e);
+    }
   }
+  
+  // Additional cleanup: remove container from DOM
+  cleanupTimeout = setTimeout(() => {
+    try {
+      const overlay = document.getElementById('tabreminder-overlay');
+      if (overlay && overlay.parentNode) {
+        overlay.parentNode.removeChild(overlay);
+      }
+      container = null;
+      cleanupTimeout = undefined;
+    } catch (e) {
+      console.warn('Error removing overlay container:', e);
+    }
+  }, 50) as unknown as number;
 }
 
 // Listen for messages from background script

@@ -70,6 +70,8 @@ export interface NotificationSettings {
 export interface Settings {
   syncEnabled: boolean;
   notifications: NotificationSettings;
+  preselectLastCategory: boolean;
+  popupHeight: number;
 }
 
 export interface TriggeredReminder {
@@ -112,4 +114,6 @@ export const DEFAULT_SETTINGS: Settings = {
       opacity: 1.0,
     },
   },
+  preselectLastCategory: false,
+  popupHeight: 600,
 };

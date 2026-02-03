@@ -5,6 +5,9 @@ import { alarmService } from '../shared/services/alarms';
 
 console.log('TabReminder background script loaded');
 
+// Track which tabs have already shown overlay for current URL
+const shownOverlays = new Map<number, string>();
+
 // Initialize extension
 browser.runtime.onInstalled.addListener(async () => {
   console.log('TabReminder installed');
@@ -35,6 +38,8 @@ browser.notifications.onClicked.addListener(async (notificationId) => {
 // Check for notes when tab is updated
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
+    // URL changed - reset overlay tracking
+    shownOverlays.delete(tabId);
     await checkForNote(tabId, tab.url);
   }
 });
@@ -43,8 +48,15 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 browser.tabs.onActivated.addListener(async (activeInfo) => {
   const tab = await browser.tabs.get(activeInfo.tabId);
   if (tab.url) {
+    // Reset overlay tracking on tab switch to show overlay
+    shownOverlays.delete(activeInfo.tabId);
     await checkForNote(activeInfo.tabId, tab.url);
   }
+});
+
+// Clear tracking when tab is closed
+browser.tabs.onRemoved.addListener((tabId) => {
+  shownOverlays.delete(tabId);
 });
 
 async function checkForNote(tabId: number, url: string): Promise<void> {
@@ -52,6 +64,7 @@ async function checkForNote(tabId: number, url: string): Promise<void> {
     const notes = await storageService.getNotesForUrl(url);
     const reminders = await storageService.getReminders();
     const categories = await storageService.getCategories();
+    const triggeredReminders = await storageService.getTriggeredReminders();
 
     // Check if page has reminders
     const hasReminders = reminders.some((r) => {
@@ -64,17 +77,42 @@ async function checkForNote(tabId: number, url: string): Promise<void> {
       }
     });
 
-    if (notes.length > 0) {
-      // Set badge to indicate note exists
-      await browser.browserAction.setBadgeText({ text: notes.length > 1 ? String(notes.length) : '!', tabId });
+    // Update badge based on priority: triggered reminders > notes, or show both
+    if (triggeredReminders.length > 0 && notes.length > 0) {
+      // Show both counts with icons
+      await browser.browserAction.setBadgeText({ 
+        text: `${triggeredReminders.length}🔔 + ${notes.length}📝`, 
+        tabId 
+      });
+      await browser.browserAction.setBadgeBackgroundColor({ color: '#e53935', tabId });
+    } else if (triggeredReminders.length > 0) {
+      // Show triggered count with icon
+      await browser.browserAction.setBadgeText({ 
+        text: `${triggeredReminders.length}🔔`, 
+        tabId 
+      });
+      await browser.browserAction.setBadgeBackgroundColor({ color: '#e53935', tabId });
+    } else if (notes.length > 0) {
+      // Show note count with icon
+      await browser.browserAction.setBadgeText({ 
+        text: `${notes.length}📝`, 
+        tabId 
+      });
       await browser.browserAction.setBadgeBackgroundColor({
         color: '#4a90d9',
         tabId,
       });
+    } else {
+      await browser.browserAction.setBadgeText({ text: '', tabId });
+    }
 
-      // Send message to content script to show overlay
+    // Show overlay for notes (separate from badge logic)
+    if (notes.length > 0) {
+      const lastShownUrl = shownOverlays.get(tabId);
+      const shouldShowOverlay = lastShownUrl !== url;
+      
       const settings = await storageService.getSettings();
-      if (settings.notifications.overlay) {
+      if (shouldShowOverlay && settings.notifications.overlay) {
         try {
           await browser.tabs.sendMessage(tabId, {
             type: 'SHOW_NOTES',
@@ -83,12 +121,11 @@ async function checkForNote(tabId: number, url: string): Promise<void> {
             overlayStyle: settings.notifications.overlayStyle,
             hasReminders,
           });
+          shownOverlays.set(tabId, url);
         } catch {
           // Content script not ready yet, ignore
         }
       }
-    } else {
-      await browser.browserAction.setBadgeText({ text: '', tabId });
     }
   } catch (error) {
     console.error('Error checking for note:', error);

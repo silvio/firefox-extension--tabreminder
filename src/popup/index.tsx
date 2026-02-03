@@ -10,6 +10,29 @@ import { usePopupState } from '../shared/hooks/usePopupState';
 
 type Tab = 'current' | 'notes' | 'reminders' | 'triggered';
 
+// Helper function to format URL based on match type
+function getDisplayUrl(note: PageNote): string {
+  try {
+    const url = new URL(note.url);
+    switch (note.urlMatchType) {
+      case 'domain':
+        return url.hostname;
+      case 'path':
+        return url.hostname + url.pathname;
+      case 'exact':
+      default:
+        return note.url;
+    }
+  } catch {
+    return note.url;
+  }
+}
+
+// Helper function to format note tooltip
+function getNoteTooltip(note: PageNote): string {
+  return `${note.title || 'Untitled'}\n\n${note.content}`;
+}
+
 function Popup() {
   const { state: popupState, updateState: updatePopupState, resetNoteForm, resetReminderForm } = usePopupState();
   const [activeTab, setActiveTab] = useState<Tab>(popupState.activeTab as Tab);
@@ -23,6 +46,7 @@ function Popup() {
   const [triggeredReminders, setTriggeredReminders] = useState<TriggeredReminder[]>([]);
   const [filterCategory, setFilterCategory] = useState<string>(popupState.filterCategory);
   const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState<any>(null);
 
   useEffect(() => {
     updatePopupState({ activeTab });
@@ -38,12 +62,13 @@ function Popup() {
 
   async function loadData() {
     try {
-      const [tabs, notesData, remindersData, categoriesData, triggeredData] = await Promise.all([
+      const [tabs, notesData, remindersData, categoriesData, triggeredData, settingsData] = await Promise.all([
         browser.tabs.query({ active: true, currentWindow: true }),
         storageService.getNotes(),
         storageService.getReminders(),
         storageService.getCategories(),
         storageService.getTriggeredReminders(),
+        storageService.getSettings(),
       ]);
 
       const url = tabs[0]?.url || '';
@@ -54,6 +79,7 @@ function Popup() {
       setReminders(remindersData);
       setCategories(categoriesData);
       setTriggeredReminders(triggeredData);
+      setSettings(settingsData);
 
       if (url) {
         const matching = await storageService.getNotesForUrl(url);
@@ -83,7 +109,7 @@ function Popup() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '500px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: `${settings?.popupHeight || 600}px` }}>
       <header style={{ padding: '12px 16px', borderBottom: '2px solid #ddd', flexShrink: 0 }}>
         <h1 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>
           TabReminder
@@ -140,13 +166,14 @@ function Popup() {
       </nav>
 
       <main style={{ flex: 1, overflow: 'auto', padding: '16px' }}>
-        {activeTab === 'current' && (
+        {activeTab === 'current' && settings && (
           <CurrentPageTab
             url={currentUrl}
             pageTitle={currentPageTitle}
             matchingNotes={matchingNotes}
             pageReminders={pageReminders}
             categories={categories}
+            preselectLastCategory={settings.preselectLastCategory}
             savedState={{
               title: popupState.noteTitle,
               content: popupState.noteContent,
@@ -207,6 +234,7 @@ function Popup() {
             notes={notes}
             categories={categories}
             filterCategory={filterCategory}
+            currentUrl={currentUrl}
             onFilterChange={setFilterCategory}
             onDelete={async (id) => {
               await storageService.deleteNote(id);
@@ -343,6 +371,7 @@ interface CurrentPageTabProps {
   matchingNotes: PageNote[];
   pageReminders: TimeReminder[];
   categories: Category[];
+  preselectLastCategory: boolean;
   savedState: NoteFormState;
   onStateChange: (state: NoteFormState) => void;
   onSave: (note: PageNote) => void;
@@ -357,6 +386,7 @@ function CurrentPageTab({
   matchingNotes,
   pageReminders,
   categories,
+  preselectLastCategory,
   savedState,
   onStateChange,
   onSave,
@@ -370,7 +400,9 @@ function CurrentPageTab({
   const [urlMatchType, setUrlMatchType] = useState<UrlMatchType>(
     savedState.urlMatchType || 'exact'
   );
-  const [categoryId, setCategoryId] = useState<string>(savedState.categoryId);
+  const [categoryId, setCategoryId] = useState<string>(
+    preselectLastCategory ? savedState.categoryId : ''
+  );
   const [matchUrl, setMatchUrl] = useState<string>(savedState.matchUrl || url);
 
   useEffect(() => {
@@ -431,49 +463,131 @@ function CurrentPageTab({
           <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
             📝 Notes for this page ({matchingNotes.length})
           </div>
-          {matchingNotes.map((note) => (
-            <div
-              key={note.id}
-              className="hover-item"
-              style={{
-                padding: '8px',
-                marginBottom: '4px',
-                backgroundColor: editingNote?.id === note.id ? '#e3f2fd' : '#f9f9f9',
-                borderRadius: '4px',
-                fontSize: '12px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ flex: 1 }}>
-                  <strong>{note.title || 'Untitled'}</strong>
-                  <span style={{ marginLeft: '8px', fontSize: '10px', color: '#999', textTransform: 'uppercase' }}>
-                    {note.urlMatchType}
-                  </span>
-                </div>
-                <div style={{ display: 'flex', gap: '4px' }}>
-                  <button
-                    onClick={() => setEditingNote(note)}
-                    className="icon-btn"
-                    title="Edit"
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', color: '#4a90d9' }}
+          {matchingNotes.map((note) => {
+            const category = categories.find((c) => c.id === note.categoryId);
+            return (
+              <div
+                key={note.id}
+                className="hover-item"
+                style={{
+                  padding: '8px',
+                  marginBottom: '4px',
+                  borderRadius: '4px',
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'flex-start',
+                  backgroundColor: '#e3f2fd',
+                  borderLeft: category ? `4px solid ${category.color}` : 'none',
+                  paddingLeft: category ? '8px' : '12px',
+                }}
+              >
+                <div style={{ fontSize: '14px', marginTop: '2px' }}>📝</div>
+                <div style={{ flex: 1, minWidth: 0 }} title={getNoteTooltip(note)}>
+                  <div
+                    title={note.title || 'Untitled'}
+                    onClick={() => {
+                      // Navigate to note URL
+                      browser.tabs.query({ url: note.url }).then((tabs) => {
+                        if (tabs.length > 0 && tabs[0].id) {
+                          browser.tabs.update(tabs[0].id, { active: true }).then(() => {
+                            if (tabs[0].windowId) {
+                              browser.windows.update(tabs[0].windowId, { focused: true });
+                            }
+                          });
+                        } else {
+                          browser.tabs.create({ url: note.url });
+                        }
+                      });
+                    }}
+                    style={{
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                      cursor: 'pointer',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
                   >
-                    ✏️
-                  </button>
-                  <button
-                    onClick={() => onDelete(note.id)}
-                    className="icon-btn"
-                    title="Delete"
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', color: '#e53935' }}
+                    {note.title || 'Untitled'}
+                  </div>
+                  <div
+                    title={getDisplayUrl(note)}
+                    style={{
+                      fontSize: '11px',
+                      color: '#999',
+                      marginBottom: '4px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
                   >
-                    🗑️
-                  </button>
+                    {getDisplayUrl(note)}
+                  </div>
+                  {note.content && (
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        color: '#666',
+                        marginBottom: '4px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {note.content.substring(0, 80)}{note.content.length > 80 ? '...' : ''}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      {category && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: category.color + '20',
+                            color: category.color,
+                          }}
+                        >
+                          {category.name}
+                        </span>
+                      )}
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: '#f5f5f5',
+                          color: '#666',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {note.urlMatchType}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={() => setEditingNote(note)}
+                        className="icon-btn"
+                        title="Edit"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', fontSize: '14px', color: '#4a90d9' }}
+                      >
+                        ✏️
+                      </button>
+                      <button
+                        onClick={() => onDelete(note.id)}
+                        className="icon-btn"
+                        title="Delete"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', fontSize: '14px', color: '#e53935' }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div style={{ color: '#666', marginTop: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {note.content.substring(0, 80)}{note.content.length > 80 ? '...' : ''}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -483,41 +597,127 @@ function CurrentPageTab({
           <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
             ⏰ Reminders for this page ({pageReminders.length})
           </div>
-          {pageReminders.map((reminder) => (
-            <div
-              key={reminder.id}
-              className="hover-item"
-              style={{
-                padding: '8px',
-                marginBottom: '4px',
-                backgroundColor: reminder.nextTrigger <= Date.now() ? '#fff3f3' : '#f9f9f9',
-                borderRadius: '4px',
-                fontSize: '12px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <strong>{reminder.title}</strong>
-                  {reminder.scheduleType === 'recurring' && (
-                    <span style={{ marginLeft: '6px', fontSize: '10px', color: '#1976d2', backgroundColor: '#e3f2fd', padding: '1px 4px', borderRadius: '4px' }}>
-                      Recurring
-                    </span>
-                  )}
+          {pageReminders.map((reminder) => {
+            const category = categories.find((c) => c.id === reminder.categoryId);
+            const isOverdue = reminder.nextTrigger <= Date.now();
+            return (
+              <div
+                key={reminder.id}
+                className="hover-item"
+                style={{
+                  padding: '8px',
+                  marginBottom: '4px',
+                  borderRadius: '4px',
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'flex-start',
+                  backgroundColor: '#e3f2fd',
+                  borderLeft: category ? `4px solid ${category.color}` : 'none',
+                  paddingLeft: category ? '8px' : '12px',
+                }}
+              >
+                <div style={{ fontSize: '14px', marginTop: '2px' }}>⌚</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    title={reminder.title}
+                    onClick={() => {
+                      // Navigate to reminder URL
+                      browser.tabs.query({ url: reminder.url }).then((tabs) => {
+                        if (tabs.length > 0 && tabs[0].id) {
+                          browser.tabs.update(tabs[0].id, { active: true }).then(() => {
+                            if (tabs[0].windowId) {
+                              browser.windows.update(tabs[0].windowId, { focused: true });
+                            }
+                          });
+                        } else {
+                          browser.tabs.create({ url: reminder.url });
+                        }
+                      });
+                    }}
+                    style={{
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                      cursor: 'pointer',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {reminder.title}
+                  </div>
+                  <div
+                    title={reminder.url}
+                    style={{
+                      fontSize: '11px',
+                      color: '#999',
+                      marginBottom: '4px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {reminder.url}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      {isOverdue && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: '#ffebee',
+                            color: '#e53935',
+                          }}
+                        >
+                          Overdue
+                        </span>
+                      )}
+                      {reminder.scheduleType === 'recurring' && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: '#e3f2fd',
+                            color: '#1976d2',
+                          }}
+                        >
+                          Recurring
+                        </span>
+                      )}
+                      {category && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: category.color + '20',
+                            color: category.color,
+                          }}
+                        >
+                          {category.name}
+                        </span>
+                      )}
+                      <span style={{ fontSize: '11px', color: isOverdue ? '#e53935' : '#666' }}>
+                        {formatRelativeTime(reminder.nextTrigger)}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={() => onDeleteReminder(reminder.id)}
+                        className="icon-btn"
+                        title="Delete"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', fontSize: '14px', color: '#e53935' }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <button
-                  onClick={() => onDeleteReminder(reminder.id)}
-                  className="icon-btn"
-                  title="Delete"
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', color: '#e53935' }}
-                >
-                  🗑️
-                </button>
               </div>
-              <div style={{ color: reminder.nextTrigger <= Date.now() ? '#e53935' : '#666', marginTop: '4px', fontSize: '11px' }}>
-                {formatRelativeTime(reminder.nextTrigger)} • {formatDate(new Date(reminder.nextTrigger))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -677,6 +877,7 @@ interface NotesListTabProps {
   notes: PageNote[];
   categories: Category[];
   filterCategory: string;
+  currentUrl: string;
   onFilterChange: (category: string) => void;
   onDelete: (id: string) => void;
 }
@@ -685,6 +886,7 @@ function NotesListTab({
   notes,
   categories,
   filterCategory,
+  currentUrl,
   onFilterChange,
   onDelete,
 }: NotesListTabProps) {
@@ -694,7 +896,40 @@ function NotesListTab({
       : notes.filter((n) => n.categoryId === filterCategory);
 
   function openNote(url: string) {
-    browser.tabs.create({ url });
+    // Find existing tab with URL or open new tab
+    browser.tabs.query({ url }).then((tabs) => {
+      if (tabs.length > 0 && tabs[0].id) {
+        browser.tabs.update(tabs[0].id, { active: true }).then(() => {
+          if (tabs[0].windowId) {
+            browser.windows.update(tabs[0].windowId, { focused: true });
+          }
+        });
+      } else {
+        browser.tabs.create({ url });
+      }
+    });
+  }
+
+  function isCurrentPageNote(note: PageNote): boolean {
+    if (!currentUrl || currentUrl.startsWith('about:') || currentUrl.startsWith('moz-extension:')) {
+      return false;
+    }
+    try {
+      const noteUrl = new URL(note.url);
+      const pageUrl = new URL(currentUrl);
+      switch (note.urlMatchType) {
+        case 'exact':
+          return note.url === currentUrl;
+        case 'path':
+          return noteUrl.hostname === pageUrl.hostname && noteUrl.pathname === pageUrl.pathname;
+        case 'domain':
+          return noteUrl.hostname === pageUrl.hostname;
+        default:
+          return false;
+      }
+    } catch {
+      return false;
+    }
   }
 
   return (
@@ -727,80 +962,127 @@ function NotesListTab({
         <div>
           {filteredNotes.map((note) => {
             const category = categories.find((c) => c.id === note.categoryId);
+            const isForCurrentPage = isCurrentPageNote(note);
             return (
               <div
                 key={note.id}
                 className="hover-item"
                 style={{
-                  padding: '10px',
-                  borderBottom: '2px solid #ddd',
+                  padding: '8px',
+                  marginBottom: '4px',
+                  borderRadius: '4px',
                   display: 'flex',
-                  justifyContent: 'space-between',
+                  gap: '8px',
                   alignItems: 'flex-start',
+                  backgroundColor: isForCurrentPage ? '#e3f2fd' : '#fff',
+                  borderLeft: category ? `4px solid ${category.color}` : 'none',
+                  paddingLeft: category ? '8px' : '12px',
                 }}
               >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 500, marginBottom: '4px' }}>
+                <div style={{ fontSize: '14px', marginTop: '2px' }}>📝</div>
+                <div style={{ flex: 1, minWidth: 0 }} title={getNoteTooltip(note)}>
+                  <div
+                    title={note.title || 'Untitled'}
+                    onClick={() => openNote(note.url)}
+                    style={{
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                      cursor: 'pointer',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
                     {note.title || 'Untitled'}
                   </div>
                   <div
+                    title={getDisplayUrl(note)}
                     style={{
                       fontSize: '11px',
-                      color: '#666',
-                      wordBreak: 'break-all',
+                      color: '#999',
                       marginBottom: '4px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
                     }}
                   >
-                    {note.url}
+                    {getDisplayUrl(note)}
                   </div>
-                  {category && (
-                    <span
+                  {note.content && (
+                    <div
                       style={{
-                        display: 'inline-block',
-                        fontSize: '10px',
-                        padding: '2px 6px',
-                        borderRadius: '10px',
-                        backgroundColor: category.color + '20',
-                        color: category.color,
+                        fontSize: '11px',
+                        color: '#666',
+                        marginBottom: '4px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
                       }}
                     >
-                      {category.name}
-                    </span>
+                      {note.content.substring(0, 80)}{note.content.length > 80 ? '...' : ''}
+                    </div>
                   )}
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <button
-                    onClick={() => openNote(note.url)}
-                    title="Open page"
-                    className="icon-btn"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#4a90d9',
-                      cursor: 'pointer',
-                      padding: '4px',
-                      fontSize: '14px',
-                      borderRadius: '4px',
-                    }}
-                  >
-                    🔗
-                  </button>
-                  <button
-                    onClick={() => onDelete(note.id)}
-                    title="Delete note"
-                    className="icon-btn"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#e53935',
-                      cursor: 'pointer',
-                      padding: '4px',
-                      fontSize: '14px',
-                      borderRadius: '4px',
-                    }}
-                  >
-                    🗑️
-                  </button>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      {category && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: category.color + '20',
+                            color: category.color,
+                          }}
+                        >
+                          {category.name}
+                        </span>
+                      )}
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: '#f5f5f5',
+                          color: '#666',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {note.urlMatchType}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={() => openNote(note.url)}
+                        title="Open page"
+                        className="icon-btn"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#4a90d9',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        🔗
+                      </button>
+                      <button
+                        onClick={() => onDelete(note.id)}
+                        title="Delete note"
+                        className="icon-btn"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#e53935',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             );
@@ -949,7 +1231,18 @@ function RemindersTab({
   }
 
   function openUrl(url: string) {
-    browser.tabs.create({ url });
+    // Find existing tab with URL or open new tab
+    browser.tabs.query({ url }).then((tabs) => {
+      if (tabs.length > 0 && tabs[0].id) {
+        browser.tabs.update(tabs[0].id, { active: true }).then(() => {
+          if (tabs[0].windowId) {
+            browser.windows.update(tabs[0].windowId, { focused: true });
+          }
+        });
+      } else {
+        browser.tabs.create({ url });
+      }
+    });
   }
 
   const sortedReminders = [...reminders].sort((a, b) => a.nextTrigger - b.nextTrigger);
@@ -985,8 +1278,187 @@ function RemindersTab({
 
   return (
     <div>
+      {/* List existing reminders first */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+        <div style={{ fontSize: '12px', fontWeight: 600, color: '#666' }}>
+          Scheduled Reminders
+        </div>
+        {reminders.filter((r) => r.nextTrigger <= Date.now()).length > 0 && (
+          <button
+            onClick={onClearOverdue}
+            className="icon-btn"
+            style={{
+              padding: '4px 8px',
+              backgroundColor: '#e53935',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '11px',
+            }}
+          >
+            Clear Overdue
+          </button>
+        )}
+      </div>
+
+      {sortedReminders.length === 0 ? (
+        <div style={{ color: '#666', textAlign: 'center', padding: '20px', fontSize: '12px' }}>
+          No reminders scheduled.
+        </div>
+      ) : (
+        <div style={{ maxHeight: '250px', overflow: 'auto', marginBottom: '16px', paddingBottom: '16px', borderBottom: '2px solid #ddd' }}>
+          {sortedReminders.map((reminder) => {
+            const category = categories.find((c) => c.id === reminder.categoryId);
+            const isOverdue = reminder.nextTrigger <= Date.now();
+            const isForCurrentPage = currentUrl && reminder.url.includes(new URL(currentUrl).hostname);
+            return (
+              <div
+                key={reminder.id}
+                style={{
+                  padding: '8px',
+                  marginBottom: '4px',
+                  borderRadius: '4px',
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'flex-start',
+                  backgroundColor: isForCurrentPage ? '#e3f2fd' : '#fff',
+                  borderLeft: category ? `4px solid ${category.color}` : 'none',
+                  paddingLeft: category ? '8px' : '12px',
+                }}
+              >
+                <div style={{ fontSize: '14px', marginTop: '2px' }}>⌚</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    title={reminder.title}
+                    onClick={() => openUrl(reminder.url)}
+                    style={{
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                      cursor: 'pointer',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {reminder.title}
+                  </div>
+                  <div
+                    title={reminder.url}
+                    style={{
+                      fontSize: '11px',
+                      color: '#999',
+                      marginBottom: '4px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {reminder.url}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      {isOverdue && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: '#ffebee',
+                            color: '#e53935',
+                          }}
+                        >
+                          Overdue
+                        </span>
+                      )}
+                      {reminder.scheduleType === 'recurring' && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: '#e3f2fd',
+                            color: '#1976d2',
+                            cursor: 'pointer',
+                          }}
+                          onClick={() => setExpandedReminder(
+                            expandedReminder === reminder.id ? null : reminder.id
+                          )}
+                        >
+                          Recurring {expandedReminder === reminder.id ? '▲' : '▼'}
+                        </span>
+                      )}
+                      {category && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: category.color + '20',
+                            color: category.color,
+                          }}
+                        >
+                          {category.name}
+                        </span>
+                      )}
+                      <span style={{ fontSize: '11px', color: isOverdue ? '#e53935' : '#666' }}>
+                        {formatRelativeTime(reminder.nextTrigger)}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={() => openUrl(reminder.url)}
+                        title="Open page"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#4a90d9',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        🔗
+                      </button>
+                      <button
+                        onClick={() => onDelete(reminder.id)}
+                        title="Delete reminder"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#e53935',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                  {expandedReminder === reminder.id && reminder.recurringPattern && (
+                    <div style={{ marginTop: '8px', fontSize: '11px', color: '#666' }}>
+                      <div style={{ fontWeight: 500, marginBottom: '4px' }}>Next occurrences:</div>
+                      {getNextOccurrences(reminder.recurringPattern, 5).map((ts, i) => (
+                        <div key={i} style={{ marginLeft: '8px' }}>
+                          • {formatDate(new Date(ts))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Add new reminder form */}
       {canAddReminder && (
         <div style={{ marginBottom: '16px', paddingBottom: '16px', borderBottom: '2px solid #ddd' }}>
+          <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '12px' }}>
+            Add New Reminder
+          </div>
           <div style={{ marginBottom: '8px' }}>
             <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>
               URL
@@ -1297,156 +1769,6 @@ function RemindersTab({
           >
             Add Reminder
           </button>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-        <div style={{ fontSize: '12px', fontWeight: 600, color: '#666' }}>
-          Scheduled Reminders
-        </div>
-        {reminders.filter((r) => r.nextTrigger <= Date.now()).length > 0 && (
-          <button
-            onClick={onClearOverdue}
-            className="icon-btn"
-            style={{
-              padding: '4px 8px',
-              backgroundColor: '#e53935',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '11px',
-            }}
-          >
-            Clear Overdue
-          </button>
-        )}
-      </div>
-
-      {sortedReminders.length === 0 ? (
-        <div style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
-          No reminders scheduled.
-        </div>
-      ) : (
-        <div style={{ maxHeight: '250px', overflow: 'auto' }}>
-          {sortedReminders.map((reminder) => {
-            const category = categories.find((c) => c.id === reminder.categoryId);
-            const isOverdue = reminder.nextTrigger <= Date.now();
-            return (
-              <div
-                key={reminder.id}
-                style={{
-                  padding: '10px',
-                  borderBottom: '2px solid #ddd',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  backgroundColor: isOverdue ? '#fff3f3' : 'transparent',
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 500, marginBottom: '4px' }}>
-                    {reminder.title}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: '12px',
-                      color: isOverdue ? '#e53935' : '#666',
-                      marginBottom: '4px',
-                    }}
-                  >
-                    {formatRelativeTime(reminder.nextTrigger)} •{' '}
-                    {formatDate(new Date(reminder.nextTrigger))}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: '11px',
-                      color: '#999',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {new URL(reminder.url).hostname}
-                  </div>
-                  <div style={{ marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                    {reminder.scheduleType === 'recurring' && (
-                      <span
-                        style={{
-                          display: 'inline-block',
-                          fontSize: '10px',
-                          padding: '2px 6px',
-                          borderRadius: '10px',
-                          backgroundColor: '#e3f2fd',
-                          color: '#1976d2',
-                          cursor: 'pointer',
-                        }}
-                        onClick={() => setExpandedReminder(
-                          expandedReminder === reminder.id ? null : reminder.id
-                        )}
-                      >
-                        Recurring {expandedReminder === reminder.id ? '▲' : '▼'}
-                      </span>
-                    )}
-                    {category && (
-                      <span
-                        style={{
-                          display: 'inline-block',
-                          fontSize: '10px',
-                          padding: '2px 6px',
-                          borderRadius: '10px',
-                          backgroundColor: category.color + '20',
-                          color: category.color,
-                        }}
-                      >
-                        {category.name}
-                      </span>
-                    )}
-                  </div>
-                  {expandedReminder === reminder.id && reminder.recurringPattern && (
-                    <div style={{ marginTop: '8px', fontSize: '11px', color: '#666' }}>
-                      <div style={{ fontWeight: 500, marginBottom: '4px' }}>Next occurrences:</div>
-                      {getNextOccurrences(reminder.recurringPattern, 5).map((ts, i) => (
-                        <div key={i} style={{ marginLeft: '8px' }}>
-                          • {formatDate(new Date(ts))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <button
-                    onClick={() => openUrl(reminder.url)}
-                    title="Open page"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#4a90d9',
-                      cursor: 'pointer',
-                      padding: '4px',
-                      fontSize: '14px',
-                    }}
-                  >
-                    🔗
-                  </button>
-                  <button
-                    onClick={() => onDelete(reminder.id)}
-                    title="Delete reminder"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#e53935',
-                      cursor: 'pointer',
-                      padding: '4px',
-                      fontSize: '14px',
-                    }}
-                  >
-                    🗑️
-                  </button>
-                </div>
-              </div>
-            );
-          })}
         </div>
       )}
     </div>
