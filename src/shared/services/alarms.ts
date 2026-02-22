@@ -2,6 +2,7 @@ import browser from 'webextension-polyfill';
 import { storageService } from './storage';
 import { TimeReminder, TriggeredReminder } from '../types';
 import { calculateNextTrigger } from '../utils/timeParser';
+import { hasAlarmSupport, hasNotificationSupport } from '../utils/platform';
 
 const ALARM_PREFIX = 'reminder_';
 
@@ -11,6 +12,10 @@ function generateId(): string {
 
 class AlarmService {
   async scheduleReminder(reminder: TimeReminder): Promise<void> {
+    if (!hasAlarmSupport()) {
+      return; // Alarms not available on this platform
+    }
+
     const alarmName = ALARM_PREFIX + reminder.id;
 
     // Only schedule if trigger is in the future
@@ -24,6 +29,9 @@ class AlarmService {
   }
 
   async cancelReminder(reminderId: string): Promise<void> {
+    if (!hasAlarmSupport()) {
+      return;
+    }
     const alarmName = ALARM_PREFIX + reminderId;
     await browser.alarms.clear(alarmName);
   }
@@ -63,6 +71,10 @@ class AlarmService {
   }
 
   async scheduleNoteReminder(note: any): Promise<void> {
+    if (!hasAlarmSupport()) {
+      return;
+    }
+
     const alarmName = ALARM_PREFIX + 'note_' + note.id;
 
     // Only schedule if trigger is in the future
@@ -76,6 +88,9 @@ class AlarmService {
   }
 
   async cancelNoteReminder(noteId: string): Promise<void> {
+    if (!hasAlarmSupport()) {
+      return;
+    }
     const alarmName = ALARM_PREFIX + 'note_' + noteId;
     await browser.alarms.clear(alarmName);
   }
@@ -144,7 +159,7 @@ class AlarmService {
 
     // Show notification
     const settings = await storageService.getSettings();
-    if (settings.notifications.system) {
+    if (settings.notifications.system && hasNotificationSupport()) {
       await browser.notifications.create(note.id, {
         type: 'basic',
         iconUrl: browser.runtime.getURL('icons/icon-48.png'),
@@ -168,6 +183,9 @@ class AlarmService {
   }
 
   private async showNotification(reminder: TimeReminder): Promise<void> {
+    if (!hasNotificationSupport()) {
+      return;
+    }
     await browser.notifications.create(reminder.id, {
       type: 'basic',
       iconUrl: browser.runtime.getURL('icons/icon-48.png'),

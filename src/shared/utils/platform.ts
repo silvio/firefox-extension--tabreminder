@@ -11,12 +11,11 @@ export function isAndroid(): boolean {
 }
 
 /**
- * Check if alarms API is supported
+ * Check if alarms API is available (runtime check for optional permission)
  */
 export function hasAlarmSupport(): boolean {
   return typeof browser !== 'undefined' && 
-         typeof browser.alarms !== 'undefined' && 
-         !isAndroid();
+         typeof browser.alarms !== 'undefined';
 }
 
 /**
@@ -27,12 +26,11 @@ export function hasBackgroundSync(): boolean {
 }
 
 /**
- * Check if notifications API is fully supported
+ * Check if notifications API is available (runtime check for optional permission)
  */
 export function hasNotificationSupport(): boolean {
   return typeof browser !== 'undefined' && 
-         typeof browser.notifications !== 'undefined' && 
-         !isAndroid();
+         typeof browser.notifications !== 'undefined';
 }
 
 /**

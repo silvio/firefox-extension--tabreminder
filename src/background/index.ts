@@ -2,7 +2,7 @@
 import browser from 'webextension-polyfill';
 import { storageService } from '../shared/services/storage';
 import { alarmService } from '../shared/services/alarms';
-import { hasAlarmSupport, hasBackgroundSync, isAndroid } from '../shared/utils/platform';
+import { hasAlarmSupport, hasBackgroundSync, hasNotificationSupport, isAndroid } from '../shared/utils/platform';
 
 console.log('TabReminder background script loaded');
 
@@ -82,7 +82,7 @@ if (hasAlarmSupport()) {
 }
 
 // Handle notification clicks (desktop only)
-if (hasAlarmSupport()) {
+if (hasNotificationSupport()) {
   browser.notifications.onClicked.addListener(async (notificationId) => {
     const reminders = await storageService.getReminders();
     const reminder = reminders.find((r) => r.id === notificationId);

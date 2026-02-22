@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "__MSG_extensionName__",
-  "version": "1.2.13",
+  "version": "1.2.14",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
   "browser_specific_settings": {
@@ -16,13 +16,14 @@
           "technicalAndInteraction"
         ]
       }
+    },
+    "gecko_android": {
+      "strict_min_version": "120.0"
     }
   },
   "permissions": [
     "storage",
     "tabs",
-    "alarms",
-    "notifications",
     "activeTab",
     "<all_urls>"
   ],

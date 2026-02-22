@@ -3,6 +3,8 @@
 A Firefox extension to remind yourself with notes when revisiting pages and
 schedule time-based reminders.
 
+**Works on both Firefox Desktop (91.0+) and Firefox for Android (120.0+)**
+
 This is a vibe coded experiment with GitHub copilot. Even so, I still use it
 every day at work and in my private life.
 
@@ -15,6 +17,7 @@ every day at work and in my private life.
 - Flexible URL matching: exact URL, path only, or entire domain
 - Categorize notes (Work, Personal, Shopping, etc.)
 - Filter notes by category
+- Available on both desktop and Android
 
 ### Time Reminders
 - Schedule reminders for pages
@@ -24,28 +27,29 @@ every day at work and in my private life.
   - "in 2 hours" (`now + 2h`)
   - "every monday" (recurring)
   - "daily"
-- System notifications when reminders are due
+- System notifications when reminders are due (desktop only)
 - Recurring reminders support
+- **Note**: Time-based reminders with alarms/notifications are only available on Firefox Desktop. Android users can use WebDAV sync for reminder notes across devices.
 
 ### Sync & Settings
-- Sync data across devices with Firefox Account (optional)
+- WebDAV sync support for cross-device synchronization
 - Configurable notifications (system, overlay, badge)
 - Export/import data for backup
 
 
 ## Usage
 
-### Popup
-Click the toolbar icon to:
+### Desktop
+Click the toolbar icon to open the popup:
 - Add/edit notes for the current page
 - Create time reminders
 - View all your notes and reminders
 
-### Sidebar
-Open the sidebar (View > Sidebar > TabReminder) for:
-- Full notes management
-- Reminders overview
-- Category management
+### Android
+Tap the extension icon to open the mobile page:
+- Add/edit notes for the current page
+- View all notes organized by category
+- Access full settings and sync configuration
 
 ### Time Input Examples
 - `tomorrow` - Tomorrow at 9 AM
@@ -58,6 +62,22 @@ Open the sidebar (View > Sidebar > TabReminder) for:
 - `every day` or `daily` - Every day at 9 AM (recurring)
 
 
+## Platform Compatibility
+
+This extension is built as a **universal package** that works on both platforms:
+
+| Feature | Desktop (91.0+) | Android (120.0+) |
+|---------|-----------------|------------------|
+| Page Notes | ✅ Yes | ✅ Yes |
+| Categories | ✅ Yes | ✅ Yes |
+| WebDAV Sync | ✅ Yes | ✅ Yes |
+| Time Reminders | ✅ Yes | ⚠️ Limited* |
+| System Notifications | ✅ Yes | ❌ No |
+| Alarms API | ✅ Yes | ❌ No |
+
+*Android: Time-based reminders can be created and synced via WebDAV, but won't trigger local notifications. Use WebDAV sync to access reminders across devices.
+
+
 # Development
 
 ## Quick Start
@@ -66,10 +86,10 @@ Open the sidebar (View > Sidebar > TabReminder) for:
 git clone <repository>
 cd firefox-extension--tabreminder
 npm install          # One-time setup
-npm run build        # Build desktop version
+npm run build        # Build universal package
 ```
 
-For complete setup instructions, development workflow, testing guides, and Android development, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+For complete setup instructions, development workflow, testing guides, and platform-specific details, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ## Requirements
 
@@ -80,8 +100,7 @@ For complete setup instructions, development workflow, testing guides, and Andro
 ## Build Commands
 
 ```bash
-npm run build          # Desktop version → dist/
-npm run build:android  # Android version → dist-android/
+npm run build          # Universal package → dist/
 npm run dev            # Watch mode for development
 npm test               # Run tests
 ```
@@ -89,9 +108,13 @@ npm test               # Run tests
 ## Distribution Packages
 
 ```bash
-make package           # Desktop: tabreminder-v<version>.zip
-make package-android   # Android: tabreminder-android-v<version>.zip
+make build             # Build universal package
+make package           # Create development package (with .gitidentity)
+make mozilla-package   # Create Mozilla submission package (clean)
+./build.sh             # Complete build script
 ```
+
+**Note**: The universal package includes both desktop and mobile interfaces. Firefox automatically uses the appropriate UI based on the platform.
 
 For detailed information, see [CONTRIBUTING.md](CONTRIBUTING.md).
 

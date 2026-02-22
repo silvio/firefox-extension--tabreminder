@@ -3,58 +3,35 @@ EXTENSION_NAME := tabreminder
 SHA1 := $(shell git rev-parse --short HEAD)
 VERSION := $(shell jq -r .version package.json)
 GIT_REPO := $(shell git config --get remote.origin.url)
-ZIP_NAME_DESKTOP := $(EXTENSION_NAME)-v$(VERSION).zip
-ZIP_NAME_ANDROID := $(EXTENSION_NAME)-android-v$(VERSION).zip
+ZIP_NAME := $(EXTENSION_NAME)-v$(VERSION).zip
 
-# Default target - build desktop version
-all: build-desktop prepare-manifest package
+# Default target - build universal package
+all: build prepare-manifest package
 
-# Build desktop version
-build-desktop: clean
-	@echo "Building desktop extension..."
-	npm run build:desktop
+# Build universal package (works on both desktop and Android)
+build: clean
+	@echo "Building universal extension (desktop + Android)..."
+	npm run build
 
-# Build Android version
-build-android: clean
-	@echo "Building Android extension..."
-	npm run build:android
-
-# Build both versions
-build-all: clean
-	@echo "Building both desktop and Android versions..."
-	npm run build:all
-
-# Prepare manifest with version_name and create .gitidentity file (desktop)
-prepare-manifest: build-desktop
-	@echo "Preparing desktop manifest with version: $(VERSION) (SHA: $(SHA1))"
+# Prepare manifest with version_name and create .gitidentity file
+prepare-manifest: build
+	@echo "Preparing manifest with version: $(VERSION) (SHA: $(SHA1))"
 	
 	@# Create .gitidentity file
 	@echo "Repository: $(GIT_REPO)" > dist/.gitidentity
 	@echo "Commit: $(SHA1)" >> dist/.gitidentity
 	@echo "Version: $(VERSION)" >> dist/.gitidentity
 	@echo "Build date: $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")" >> dist/.gitidentity
-	@echo "Platform: desktop" >> dist/.gitidentity
+	@echo "Platform: universal (desktop + Android)" >> dist/.gitidentity
 	@echo "✓ Created .gitidentity file"
 
-# Prepare Android manifest
-prepare-manifest-android: build-android
-	@echo "Preparing Android manifest with version: $(VERSION) (SHA: $(SHA1))"
-	
-	@# Create .gitidentity file
-	@echo "Repository: $(GIT_REPO)" > dist-android/.gitidentity
-	@echo "Commit: $(SHA1)" >> dist-android/.gitidentity
-	@echo "Version: $(VERSION)" >> dist-android/.gitidentity
-	@echo "Build date: $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")" >> dist-android/.gitidentity
-	@echo "Platform: android" >> dist-android/.gitidentity
-	@echo "✓ Created Android .gitidentity file"
-
-# Create distribution package (desktop)
+# Create distribution package
 package: prepare-manifest
-	@echo "Creating desktop distribution package: $(ZIP_NAME_DESKTOP)"
-	@cd dist && zip -r ../$(ZIP_NAME_DESKTOP) . > /dev/null
-	@echo "✓ Package created: $(ZIP_NAME_DESKTOP)"
-	@echo "  Size: $$(du -h $(ZIP_NAME_DESKTOP) | cut -f1)"
-	@echo "  SHA256: $$(shasum -a 256 $(ZIP_NAME_DESKTOP) | cut -d' ' -f1)"
+	@echo "Creating universal distribution package: $(ZIP_NAME)"
+	@cd dist && zip -r ../$(ZIP_NAME) . > /dev/null
+	@echo "✓ Package created: $(ZIP_NAME)"
+	@echo "  Size: $$(du -h $(ZIP_NAME) | cut -f1)"
+	@echo "  SHA256: $$(shasum -a 256 $(ZIP_NAME) | cut -d' ' -f1)"
 	@echo ""
 	@echo "Git identity:"
 	@cat dist/.gitidentity | sed 's/^/  /'
@@ -62,41 +39,21 @@ package: prepare-manifest
 	@echo "Manifest version info:"
 	@echo "  version: $$(jq -r '.version' dist/manifest.json 2>/dev/null || echo 'N/A')"
 
-# Create Android distribution package
-package-android: prepare-manifest-android
-	@echo "Creating Android distribution package: $(ZIP_NAME_ANDROID)"
-	@cd dist-android && zip -r ../$(ZIP_NAME_ANDROID) . > /dev/null
-	@echo "✓ Package created: $(ZIP_NAME_ANDROID)"
-	@echo "  Size: $$(du -h $(ZIP_NAME_ANDROID) | cut -f1)"
-	@echo "  SHA256: $$(shasum -a 256 $(ZIP_NAME_ANDROID) | cut -d' ' -f1)"
-	@echo ""
-	@echo "Git identity:"
-	@cat dist-android/.gitidentity | sed 's/^/  /'
-	@echo ""
-	@echo "Manifest version info:"
-	@echo "  version: $$(jq -r '.version' dist-android/manifest.json 2>/dev/null || echo 'N/A')"
-
-# Create both packages
-package-all: package package-android
-	@echo ""
-	@echo "✓ Created both desktop and Android packages"
-
-# Create package for Mozilla submission (clean version, no git info in filename)
+# Create package for Mozilla submission (clean version, no git info)
 mozilla-package: build
 	@echo "Creating Mozilla submission package..."
-	@# Just copy dist contents, no .gitidentity
 	@cp -r dist dist-mozilla
-	@# Ensure version is clean (no SHA in version field)
 	@cd dist-mozilla && zip -r ../$(ZIP_NAME) . > /dev/null
 	@rm -rf dist-mozilla
 	@echo "✓ Mozilla package ready: $(ZIP_NAME)"
 	@echo "  Note: No .gitidentity file included for Mozilla submission"
+	@echo "  Note: Works on both Firefox Desktop and Android"
 
 # Clean build artifacts
 clean:
 	@echo "Cleaning up..."
 	@rm -f $(EXTENSION_NAME)-*.zip
-	@rm -rf dist dist-android 2>/dev/null || true
+	@rm -rf dist 2>/dev/null || true
 	@echo "✓ Clean complete"
 
 # Test the extension in Firefox
@@ -141,6 +98,34 @@ sourcecode-package:
 	@git archive --format=tar --prefix=$(EXTENSION_NAME)-source-v$(VERSION)/ HEAD | gzip > $(EXTENSION_NAME)-source-v$(VERSION).tar.gz
 	@echo "✓ Source code package created: $(EXTENSION_NAME)-source-v$(VERSION).tar.gz"
 
+# Complete release build (for CI/CD or clean checkout)
+release: clean install check-version build package mozilla-package sourcecode-package
+	@echo ""
+	@echo "=========================================="
+	@echo "✓ Release build complete!"
+	@echo "=========================================="
+	@echo ""
+	@echo "Development package (with .gitidentity):"
+	@ls -lh $(ZIP_NAME) 2>/dev/null || echo "  None created"
+	@echo ""
+	@echo "Mozilla submission package (clean):"
+	@ls -lh $(ZIP_NAME) 2>/dev/null || echo "  None created"
+	@echo ""
+	@echo "Source code package:"
+	@ls -lh $(EXTENSION_NAME)-source-v$(VERSION).tar.gz 2>/dev/null || echo "  None created"
+	@echo ""
+	@echo "Version: $(VERSION)"
+	@echo "Git SHA: $(SHA1)"
+	@echo ""
+	@echo "Note: This universal package works on both Firefox Desktop and Android"
+
+# Git branch synchronization
+sync-main:
+	@./sync-main.sh
+
+sync-main-dry-run:
+	@./sync-main.sh --dry-run
+
 # Install dependencies
 install:
 	npm install
@@ -157,22 +142,18 @@ check-version:
 
 show-version: VERSION := $(shell jq -r .version package.json)
 show-version: MANI_VERSION := $(shell jq -r .version public/manifest.json)
-show-version: ANDROID_VERSION := $(shell jq -r .version public/manifest.android.json)
 show-version: DIST_VERSION := $(shell jq -r .version dist/manifest.json 2>/dev/null || echo 'N/A')
-show-version: DIST_ANDROID_VERSION := $(shell jq -r .version dist-android/manifest.json 2>/dev/null || echo 'N/A')
 show-version:
 	@echo "Current package version:  $(VERSION)"
 	@echo "Current manifest version: $(MANI_VERSION)"
-	@echo "Current Android manifest version: $(ANDROID_VERSION)"
-	@echo "Built desktop manifest version: $(DIST_VERSION)"
-	@echo "Built Android manifest version: $(DIST_ANDROID_VERSION)"
-	@if [ "$(VERSION)" != "$(MANI_VERSION)" ] || [ "$(VERSION)" != "$(ANDROID_VERSION)" ]; then \
+	@echo "Built manifest version: $(DIST_VERSION)"
+	@if [ "$(VERSION)" != "$(MANI_VERSION)" ]; then \
 		echo ""; \
 		echo "⚠ Version mismatch detected! Consider running 'make bump-version-number-*' to synchronize versions."; \
 	fi
-	@if [ "$(VERSION)" != "$(DIST_VERSION)" ] || [ "$(VERSION)" != "$(DIST_ANDROID_VERSION)" ]; then \
+	@if [ "$(VERSION)" != "$(DIST_VERSION)" ]; then \
 		echo ""; \
-		echo "⚠ Built manifest version mismatch detected! Consider running 'make build-all' to update built manifest versions."; \
+		echo "⚠ Built manifest version mismatch detected! Consider running 'make build' to update built manifest version."; \
 	fi
 
 # Update of versionnumber in package.json and public/manifest.json
@@ -187,9 +168,7 @@ define bump_version
 		exit 1; \
 	fi; \
 	jq --arg version "$$NEW_VERSION" '.version = $$version' public/manifest.json > public/manifest.json.tmp && \
-	mv public/manifest.json.tmp public/manifest.json && \
-	jq --arg version "$$NEW_VERSION" '.version = $$version' public/manifest.android.json > public/manifest.android.json.tmp && \
-	mv public/manifest.android.json.tmp public/manifest.android.json
+	mv public/manifest.json.tmp public/manifest.json
 	@echo "✓ Version bumped to $$(jq -r .version package.json)"
 endef
 
@@ -204,4 +183,4 @@ bump-version-number-major:
 
 
 # Phony targets (not actual files)
-.PHONY: all build-desktop build-android build-all prepare-manifest prepare-manifest-android package package-android package-all mozilla-package clean test lint info install bump-version-number-bugfixlevel bump-version-number-minor bump-version-number-major check-version show-version sourcecode-package
+.PHONY: all build prepare-manifest package mozilla-package release sync-main sync-main-dry-run clean test lint info install bump-version-number-bugfixlevel bump-version-number-minor bump-version-number-major check-version show-version sourcecode-package
