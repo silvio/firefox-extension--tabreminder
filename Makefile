@@ -38,16 +38,30 @@ package: prepare-manifest
 	@echo "Manifest version info:"
 	@echo "  version: $$(jq -r '.version' dist/manifest.json 2>/dev/null || echo 'N/A')"
 
-# Create package for Mozilla submission (clean version, no git info in filename)
-mozilla-package: build
-	@echo "Creating Mozilla submission package..."
-	@# Just copy dist contents, no .gitidentity
+# Create package for Mozilla submission - Desktop (clean version, no git info)
+mozilla-package: build-desktop
+	@echo "Creating Mozilla desktop submission package..."
 	@cp -r dist dist-mozilla
-	@# Ensure version is clean (no SHA in version field)
-	@cd dist-mozilla && zip -r ../$(ZIP_NAME) . > /dev/null
+	@cd dist-mozilla && zip -r ../$(ZIP_NAME_DESKTOP) . > /dev/null
 	@rm -rf dist-mozilla
-	@echo "✓ Mozilla package ready: $(ZIP_NAME)"
+	@echo "✓ Mozilla desktop package ready: $(ZIP_NAME_DESKTOP)"
 	@echo "  Note: No .gitidentity file included for Mozilla submission"
+
+# Create package for Mozilla submission - Android (clean version, no git info)
+mozilla-package-android: build-android
+	@echo "Creating Mozilla Android submission package..."
+	@cp -r dist-android dist-mozilla-android
+	@cd dist-mozilla-android && zip -r ../$(ZIP_NAME_ANDROID) . > /dev/null
+	@rm -rf dist-mozilla-android
+	@echo "✓ Mozilla Android package ready: $(ZIP_NAME_ANDROID)"
+	@echo "  Note: No .gitidentity file included for Mozilla submission"
+
+# Create both Mozilla submission packages
+mozilla-package-all: mozilla-package mozilla-package-android
+	@echo ""
+	@echo "✓ Created both Mozilla submission packages:"
+	@echo "  Desktop: $(ZIP_NAME_DESKTOP)"
+	@echo "  Android: $(ZIP_NAME_ANDROID)"
 
 # Clean build artifacts
 clean:
@@ -98,9 +112,28 @@ sourcecode-package:
 	@git archive --format=tar --prefix=$(EXTENSION_NAME)-source-v$(VERSION)/ HEAD | gzip > $(EXTENSION_NAME)-source-v$(VERSION).tar.gz
 	@echo "✓ Source code package created: $(EXTENSION_NAME)-source-v$(VERSION).tar.gz"
 
+# Complete release build (for CI/CD or clean checkout)
+release: clean install check-version build-all package-all mozilla-package-all sourcecode-package
+	@echo ""
+	@echo "=========================================="
+	@echo "✓ Release build complete!"
+	@echo "=========================================="
+	@echo ""
+	@echo "Development packages (with .gitidentity):"
+	@ls -lh $(ZIP_NAME_DESKTOP) $(ZIP_NAME_ANDROID) 2>/dev/null || echo "  None created"
+	@echo ""
+	@echo "Mozilla submission packages (clean):"
+	@ls -lh $(ZIP_NAME_DESKTOP) $(ZIP_NAME_ANDROID) 2>/dev/null || echo "  None created"
+	@echo ""
+	@echo "Source code package:"
+	@ls -lh $(EXTENSION_NAME)-source-v$(VERSION).tar.gz 2>/dev/null || echo "  None created"
+	@echo ""
+	@echo "Version: $(VERSION)"
+	@echo "Git SHA: $(SHA1)"
+
 # Install dependencies
 install:
 	npm install
 
 # Phony targets (not actual files)
-.PHONY: all build prepare-manifest package mozilla-package clean test lint info install
+.PHONY: all build prepare-manifest package mozilla-package mozilla-package-android mozilla-package-all release clean test lint info install
