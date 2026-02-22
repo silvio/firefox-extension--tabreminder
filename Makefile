@@ -131,9 +131,16 @@ release: clean install check-version build-all package-all mozilla-package-all s
 	@echo "Version: $(VERSION)"
 	@echo "Git SHA: $(SHA1)"
 
+# Git branch synchronization
+sync-main:
+	@./sync-main.sh
+
+sync-main-dry-run:
+	@./sync-main.sh --dry-run
+
 # Install dependencies
 install:
 	npm install
 
 # Phony targets (not actual files)
-.PHONY: all build prepare-manifest package mozilla-package mozilla-package-android mozilla-package-all release clean test lint info install
+.PHONY: all build prepare-manifest package mozilla-package mozilla-package-android mozilla-package-all release sync-main sync-main-dry-run clean test lint info install
