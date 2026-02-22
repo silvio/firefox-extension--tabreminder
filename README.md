@@ -60,25 +60,38 @@ Open the sidebar (View > Sidebar > TabReminder) for:
 
 # Development
 
-Environment:
+## Quick Start
 
-- tested on (arch-) linux, with:
-  - npm-version: 11.7.0
-  - node-version: v22.22.0
-  - make-version: 4.4.1
-  - bash-version: 5.3.9-1
+```bash
+git clone <repository>
+cd firefox-extension--tabreminder
+npm install          # One-time setup
+npm run build        # Build desktop version
+```
 
-- installed:
-  - `make`
-  - `npm`
-  - `node`
-  - `bash`
+For complete setup instructions, development workflow, testing guides, and Android development, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
-# How to build?
+## Requirements
 
-- build and package: `./build.sh`
-- for firefox package: `make mozilla-package`
-- to build: `make build`
-- setup build environment: `make install`
-- build sourcecode package: `make sourcecode-package`
+- Node.js >= 18
+- npm >= 8
+- make, bash, git
+
+## Build Commands
+
+```bash
+npm run build          # Desktop version → dist/
+npm run build:android  # Android version → dist-android/
+npm run dev            # Watch mode for development
+npm test               # Run tests
+```
+
+## Distribution Packages
+
+```bash
+make package           # Desktop: tabreminder-v<version>.zip
+make package-android   # Android: tabreminder-android-v<version>.zip
+```
+
+For detailed information, see [CONTRIBUTING.md](CONTRIBUTING.md).
 

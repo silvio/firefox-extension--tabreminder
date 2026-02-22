@@ -68,6 +68,10 @@ export function extractPath(url: string): string {
 
 export function getUrlMatchPreview(url: string, matchType: UrlMatchType): string {
   try {
+    if (matchType === 'regex') {
+      // For regex, just return the pattern (url is already a pattern string)
+      return `Pattern: ${url}`;
+    }
     const parsed = new URL(url);
     switch (matchType) {
       case 'exact':

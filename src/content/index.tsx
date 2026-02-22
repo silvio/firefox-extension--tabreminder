@@ -126,6 +126,27 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
                 </div>
               </div>
               <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  onClick={async () => {
+                    // Store note ID for editing
+                    await browser.storage.local.set({ pendingEditNoteId: note.id });
+                    // Request background script to open popup
+                    await browser.runtime.sendMessage({ type: 'OPEN_POPUP_FOR_EDIT', noteId: note.id });
+                    // Close overlay
+                    onClose();
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    color: '#4a90d9',
+                    padding: '0 4px',
+                  }}
+                  title="Edit note (opens in popup)"
+                >
+                  ✏️
+                </button>
                 {visibleNotes.length > 1 && (
                   <button
                     onClick={() => setDismissed(new Set([...dismissed, note.id]))}
@@ -303,15 +324,72 @@ function hideNote() {
   }, 50) as unknown as number;
 }
 
+// Toast notification for sync updates
+function showSyncToast(message: string) {
+  const toast = document.createElement('div');
+  toast.id = 'tabreminder-sync-toast';
+  toast.textContent = message;
+  toast.style.cssText = `
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #4a90d9;
+    color: white;
+    padding: 12px 20px;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    z-index: 2147483647;
+    font-family: system-ui, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    animation: slideIn 0.3s ease-out;
+  `;
+  
+  // Add animation
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes slideIn {
+      from { transform: translateX(400px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes slideOut {
+      from { transform: translateX(0); opacity: 1; }
+      to { transform: translateX(400px); opacity: 0; }
+    }
+  `;
+  document.head.appendChild(style);
+  
+  document.body.appendChild(toast);
+  
+  // Remove after 4 seconds
+  setTimeout(() => {
+    toast.style.animation = 'slideOut 0.3s ease-out';
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
 // Listen for messages from background script
 browser.runtime.onMessage.addListener((message: unknown) => {
-  const msg = message as { type: string; note?: PageNote; notes?: PageNote[]; categories?: Category[]; overlayStyle?: OverlayStyle; hasReminders?: boolean };
+  const msg = message as { 
+    type: string; 
+    note?: PageNote; 
+    notes?: PageNote[]; 
+    categories?: Category[]; 
+    overlayStyle?: OverlayStyle; 
+    hasReminders?: boolean;
+    notesCount?: number;
+    categoriesCount?: number;
+  };
+  
   if (msg.type === 'SHOW_NOTE' && msg.note) {
     // Legacy single note
     showNotes([msg.note], msg.categories || [], msg.overlayStyle || defaultStyle, msg.hasReminders || false);
   } else if (msg.type === 'SHOW_NOTES' && msg.notes) {
     // Multiple notes
     showNotes(msg.notes, msg.categories || [], msg.overlayStyle || defaultStyle, msg.hasReminders || false);
+  } else if (msg.type === 'SYNC_UPDATE') {
+    // Show toast for sync updates
+    showSyncToast(`🔄 Sync updated: ${msg.notesCount || 0} notes, ${msg.categoriesCount || 0} categories`);
   }
   return undefined;
 });

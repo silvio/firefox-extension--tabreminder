@@ -1,14 +1,21 @@
 {
   "name": "firefox-extension--tabreminder",
-  "version": "1.0.6",
+  "version": "1.2.13",
   "description": "Firefox extension to remind yourself with notes when revisiting pages and schedule time-based reminders",
   "main": "index.js",
   "scripts": {
-    "build": "webpack --mode production",
-    "dev": "webpack --mode development --watch",
+    "build": "npm run build:desktop",
+    "build:desktop": "webpack --mode production --env platform=desktop",
+    "build:android": "webpack --mode production --env platform=android",
+    "build:all": "npm run build:desktop && npm run build:android",
+    "dev": "webpack --mode development --watch --env platform=desktop",
+    "dev:android": "webpack --mode development --watch --env platform=android",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:desktop": "cd dist && web-ext run --firefox=firefox",
+    "test:android": "cd dist-android && web-ext run --target=firefox-android --firefox-apk=org.mozilla.fenix",
+    "lint:ext": "web-ext lint --source-dir=./dist"
   },
   "keywords": [],
   "author": "",
@@ -34,6 +41,7 @@
     "ts-jest": "^29.4.6",
     "ts-loader": "^9.5.4",
     "typescript": "^5.9.3",
+    "web-ext": "^9.3.0",
     "webextension-polyfill": "^0.12.0",
     "webpack": "^5.104.1",
     "webpack-cli": "^6.0.1"
@@ -41,6 +49,11 @@
   "dependencies": {
     "chrono-node": "^2.9.0",
     "pako": "^2.1.0",
-    "uuid": "^13.0.0"
+    "react-calendar": "^6.0.0",
+    "react-date-picker": "^12.0.1",
+    "react-datetime-picker": "^7.0.1",
+    "react-time-picker": "^8.0.2",
+    "uuid": "^13.0.0",
+    "webdav": "^5.9.0"
   }
 }

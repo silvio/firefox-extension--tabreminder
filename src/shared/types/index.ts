@@ -1,10 +1,13 @@
-export type UrlMatchType = 'exact' | 'path' | 'domain';
+export type UrlMatchType = 'exact' | 'path' | 'domain' | 'regex';
 
 export interface Category {
   id: string;
   name: string;
   color: string;
   isDefault: boolean;
+  webdavSync?: boolean;
+  lastSyncTime?: number;
+  updatedAt?: number;
 }
 
 export interface PageNote {
@@ -16,6 +19,15 @@ export interface PageNote {
   categoryId: string | null;
   createdAt: number;
   updatedAt: number;
+  // Optional reminder fields
+  hasReminder?: boolean;
+  scheduleType?: ScheduleType;
+  scheduledTime?: number | null;
+  recurringPattern?: RecurringPattern | null;
+  nextTrigger?: number;
+  // Soft delete fields
+  deleted?: boolean;
+  deletedAt?: number;
 }
 
 export type ScheduleType = 'once' | 'recurring';
@@ -67,11 +79,41 @@ export interface NotificationSettings {
   overlayStyle: OverlayStyle;
 }
 
-export interface Settings {
+// Settings that sync via Firefox Account (browser.storage.sync)
+// These are safe to sync across devices
+export interface SyncedSettings {
   syncEnabled: boolean;
   notifications: NotificationSettings;
   preselectLastCategory: boolean;
   popupHeight: number;
+  webdavUrl?: string; // URL syncs so same server on all devices
+  webdavEnabled?: boolean; // Enabled state syncs
+  categoryColors?: { [categoryId: string]: string }; // Category colors sync across devices
+}
+
+// Settings stored locally only (browser.storage.local)
+// These contain sensitive data and should NOT sync
+export interface LocalSettings {
+  lastDeleteAllTimestamp?: number;
+  webdavUsername?: string; // Credentials are per-device
+  webdavPassword?: string; // NEVER sync passwords!
+  webdavBasePath?: string; // Paths are per-device
+  webdavSyncInterval?: number; // Intervals are per-device
+  webdavLastSync?: number; // Sync state is per-device
+  webdavSyncErrors?: string | { message: string; timestamp: number }; // Errors with timestamp
+}
+
+// Combined settings interface for backwards compatibility
+export interface Settings extends SyncedSettings, LocalSettings {}
+
+
+export interface CategoryFile {
+  version: number;
+  categoryId: string;
+  categoryName: string;
+  categoryColor: string;
+  notes: PageNote[];
+  lastModified: number;
 }
 
 export interface TriggeredReminder {

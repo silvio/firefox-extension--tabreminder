@@ -13,6 +13,11 @@ class AlarmService {
   async scheduleReminder(reminder: TimeReminder): Promise<void> {
     const alarmName = ALARM_PREFIX + reminder.id;
 
+    // Only schedule if trigger is in the future
+    if (reminder.nextTrigger <= Date.now()) {
+      return;
+    }
+
     await browser.alarms.create(alarmName, {
       when: reminder.nextTrigger,
     });
@@ -25,8 +30,10 @@ class AlarmService {
 
   async rescheduleAllReminders(): Promise<void> {
     const reminders = await storageService.getReminders();
+    const notes = await storageService.getNotes();
     const now = Date.now();
 
+    // Schedule old TimeReminder objects
     for (const reminder of reminders) {
       if (reminder.nextTrigger > now) {
         await this.scheduleReminder(reminder);
@@ -38,6 +45,39 @@ class AlarmService {
         await this.scheduleReminder(reminder);
       }
     }
+
+    // Schedule PageNote reminders
+    for (const note of notes) {
+      if (note.hasReminder && note.nextTrigger) {
+        if (note.nextTrigger > now) {
+          await this.scheduleNoteReminder(note);
+        } else if (note.scheduleType === 'recurring' && note.recurringPattern) {
+          // Update next trigger for recurring note reminders
+          const nextTrigger = calculateNextTrigger(note.recurringPattern);
+          note.nextTrigger = nextTrigger;
+          await storageService.saveNote(note);
+          await this.scheduleNoteReminder(note);
+        }
+      }
+    }
+  }
+
+  async scheduleNoteReminder(note: any): Promise<void> {
+    const alarmName = ALARM_PREFIX + 'note_' + note.id;
+
+    // Only schedule if trigger is in the future
+    if (!note.nextTrigger || note.nextTrigger <= Date.now()) {
+      return;
+    }
+
+    await browser.alarms.create(alarmName, {
+      when: note.nextTrigger,
+    });
+  }
+
+  async cancelNoteReminder(noteId: string): Promise<void> {
+    const alarmName = ALARM_PREFIX + 'note_' + noteId;
+    await browser.alarms.clear(alarmName);
   }
 
   async handleAlarm(alarmName: string): Promise<void> {
@@ -45,7 +85,17 @@ class AlarmService {
       return;
     }
 
-    const reminderId = alarmName.slice(ALARM_PREFIX.length);
+    const idPart = alarmName.slice(ALARM_PREFIX.length);
+    
+    // Check if it's a note reminder
+    if (idPart.startsWith('note_')) {
+      const noteId = idPart.slice(5); // Remove 'note_' prefix
+      await this.handleNoteReminder(noteId);
+      return;
+    }
+
+    // Handle old TimeReminder
+    const reminderId = idPart;
     const reminders = await storageService.getReminders();
     const reminder = reminders.find((r) => r.id === reminderId);
 
@@ -81,6 +131,39 @@ class AlarmService {
       reminder.nextTrigger = nextTrigger;
       await storageService.saveReminder(reminder);
       await this.scheduleReminder(reminder);
+    }
+  }
+
+  private async handleNoteReminder(noteId: string): Promise<void> {
+    const notes = await storageService.getNotes();
+    const note = notes.find((n) => n.id === noteId);
+
+    if (!note || !note.hasReminder) {
+      return;
+    }
+
+    // Show notification
+    const settings = await storageService.getSettings();
+    if (settings.notifications.system) {
+      await browser.notifications.create(note.id, {
+        type: 'basic',
+        iconUrl: browser.runtime.getURL('icons/icon-48.png'),
+        title: 'TabReminder: ' + (note.title || 'Note'),
+        message: note.content || 'Time to check this page!',
+      });
+    }
+
+    // Update badge
+    if (settings.notifications.badge) {
+      await this.updateTriggeredBadge();
+    }
+
+    // Handle recurring note reminders
+    if (note.scheduleType === 'recurring' && note.recurringPattern) {
+      const nextTrigger = calculateNextTrigger(note.recurringPattern);
+      note.nextTrigger = nextTrigger;
+      await storageService.saveNote(note);
+      await this.scheduleNoteReminder(note);
     }
   }
 

@@ -1,18 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import browser from 'webextension-polyfill';
+import DateTimePicker from 'react-datetime-picker';
+import 'react-datetime-picker/dist/DateTimePicker.css';
+import 'react-calendar/dist/Calendar.css';
+import 'react-clock/dist/Clock.css';
 import { storageService } from '../shared/services/storage';
 import { alarmService } from '../shared/services/alarms';
-import { PageNote, TimeReminder, Category, UrlMatchType, TriggeredReminder, RecurringPattern, FrequencyType, EndCondition } from '../shared/types';
+import { PageNote, TimeReminder, Category, UrlMatchType, TriggeredReminder, RecurringPattern, FrequencyType, EndCondition, ScheduleType } from '../shared/types';
 import { createNote, createReminder, getUrlMatchPreview } from '../shared/utils/helpers';
 import { parseTimeInput, formatDate, formatRelativeTime, getNextOccurrences, calculateNextTrigger, describeRecurringPattern } from '../shared/utils/timeParser';
 import { usePopupState } from '../shared/hooks/usePopupState';
 
 type Tab = 'current' | 'notes' | 'reminders' | 'triggered';
 
+// Helper function to get light background color from category color
+function getLightColor(color: string, opacity: number = 0.15): string {
+  // Convert hex to RGB and apply opacity for light background
+  return color + Math.round(opacity * 255).toString(16).padStart(2, '0');
+}
+
 // Helper function to format URL based on match type
 function getDisplayUrl(note: PageNote): string {
   try {
+    if (note.urlMatchType === 'regex') {
+      return `regex: ${note.url}`;
+    }
     const url = new URL(note.url);
     switch (note.urlMatchType) {
       case 'domain':
@@ -47,6 +60,7 @@ function Popup() {
   const [filterCategory, setFilterCategory] = useState<string>(popupState.filterCategory);
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState<any>(null);
+  const [editingNote, setEditingNote] = useState<PageNote | null>(null);
 
   useEffect(() => {
     updatePopupState({ activeTab });
@@ -96,6 +110,21 @@ function Popup() {
           }
         });
         setPageReminders(pageRems);
+      }
+      
+      // Check for pending edit from overlay
+      const { pendingEditNoteId } = await browser.storage.local.get('pendingEditNoteId');
+      if (pendingEditNoteId) {
+        // Find the note
+        const noteToEdit = notesData.find((n) => n.id === pendingEditNoteId);
+        if (noteToEdit) {
+          // Switch to "This Page" tab
+          setActiveTab('current');
+          // Set the note to edit
+          setEditingNote(noteToEdit);
+        }
+        // Clear the pending edit
+        await browser.storage.local.remove('pendingEditNoteId');
       }
     } catch (error) {
       console.error('Error loading data:', error);
@@ -165,7 +194,7 @@ function Popup() {
         })}
       </nav>
 
-      <main style={{ flex: 1, overflow: 'auto', padding: '16px' }}>
+      <main style={{ flex: 1, overflow: 'hidden', padding: '16px', display: 'flex', flexDirection: 'column' }}>
         {activeTab === 'current' && settings && (
           <CurrentPageTab
             url={currentUrl}
@@ -174,6 +203,7 @@ function Popup() {
             pageReminders={pageReminders}
             categories={categories}
             preselectLastCategory={settings.preselectLastCategory}
+            editingNote={editingNote}
             savedState={{
               title: popupState.noteTitle,
               content: popupState.noteContent,
@@ -190,6 +220,10 @@ function Popup() {
             })}
             onSave={async (note) => {
               await storageService.saveNote(note);
+              // Trigger immediate sync (no debounce) so sync happens even if popup closes immediately
+              if (note.categoryId) {
+                await storageService.triggerWebDAVSyncImmediate(note.categoryId);
+              }
               setNotes(await storageService.getNotes());
               setMatchingNotes(await storageService.getNotesForUrl(currentUrl));
               browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
@@ -203,6 +237,7 @@ function Popup() {
               resetNoteForm();
             }}
             onEditNote={(note) => {
+              setEditingNote(note);
               updatePopupState({
                 noteTitle: note.title,
                 noteContent: note.content,
@@ -211,6 +246,7 @@ function Popup() {
                 noteMatchUrl: note.url,
               });
             }}
+            onCancelEdit={() => setEditingNote(null)}
             onDeleteReminder={async (id) => {
               await storageService.deleteReminder(id);
               setReminders(await storageService.getReminders());
@@ -241,51 +277,41 @@ function Popup() {
               setNotes(await storageService.getNotes());
               browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
             }}
+            onEdit={(note) => {
+              setEditingNote(note);
+              setActiveTab('current');
+              updatePopupState({
+                noteTitle: note.title,
+                noteContent: note.content,
+                noteUrlMatchType: note.urlMatchType,
+                noteCategoryId: note.categoryId || '',
+                noteMatchUrl: note.url,
+              });
+            }}
           />
         )}
 
         {activeTab === 'reminders' && (
           <RemindersTab
-            reminders={reminders}
+            notes={notes}
             categories={categories}
             currentUrl={currentUrl}
-            savedState={{
-              title: popupState.reminderTitle,
-              timeInput: popupState.reminderTimeInput,
-              categoryId: popupState.reminderCategoryId,
-              matchUrl: popupState.reminderMatchUrl || currentUrl,
-            }}
-            onStateChange={(state) => updatePopupState({
-              reminderTitle: state.title,
-              reminderTimeInput: state.timeInput,
-              reminderCategoryId: state.categoryId,
-              reminderMatchUrl: state.matchUrl,
-            })}
-            onAdd={async (reminder) => {
-              await storageService.saveReminder(reminder);
-              setReminders(await storageService.getReminders());
-              browser.runtime.sendMessage({ type: 'REMINDER_CREATED' });
-              resetReminderForm();
+            onEdit={(note) => {
+              setEditingNote(note);
+              setActiveTab('current');
+              updatePopupState({
+                noteTitle: note.title,
+                noteContent: note.content,
+                noteUrlMatchType: note.urlMatchType,
+                noteCategoryId: note.categoryId || '',
+                noteMatchUrl: note.url,
+              });
             }}
             onDelete={async (id) => {
-              await storageService.deleteReminder(id);
-              setReminders(await storageService.getReminders());
-              browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
-            }}
-            onClearOverdue={async () => {
-              const now = Date.now();
-              for (const reminder of reminders) {
-                if (reminder.nextTrigger <= now) {
-                  if (reminder.scheduleType === 'recurring' && reminder.recurringPattern) {
-                    reminder.nextTrigger = calculateNextTrigger(reminder.recurringPattern);
-                    await storageService.saveReminder(reminder);
-                  } else {
-                    await storageService.deleteReminder(reminder.id);
-                  }
-                }
-              }
-              setReminders(await storageService.getReminders());
-              browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+              await storageService.deleteNote(id);
+              setNotes(await storageService.getNotes());
+              setMatchingNotes(await storageService.getNotesForUrl(currentUrl));
+              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
             }}
           />
         )}
@@ -293,6 +319,8 @@ function Popup() {
         {activeTab === 'triggered' && (
           <TriggeredTab
             triggeredReminders={triggeredReminders}
+            categories={categories}
+            reminders={reminders}
             onNavigate={async (triggered) => {
               // Find existing tab with URL or open new tab
               const tabs = await browser.tabs.query({ url: triggered.url });
@@ -373,10 +401,12 @@ interface CurrentPageTabProps {
   categories: Category[];
   preselectLastCategory: boolean;
   savedState: NoteFormState;
+  editingNote: PageNote | null;
   onStateChange: (state: NoteFormState) => void;
   onSave: (note: PageNote) => void;
   onDelete: (id: string) => void;
   onEditNote: (note: PageNote) => void;
+  onCancelEdit: () => void;
   onDeleteReminder: (id: string) => void;
 }
 
@@ -388,13 +418,14 @@ function CurrentPageTab({
   categories,
   preselectLastCategory,
   savedState,
+  editingNote,
   onStateChange,
   onSave,
   onDelete,
   onEditNote,
+  onCancelEdit,
   onDeleteReminder,
 }: CurrentPageTabProps) {
-  const [editingNote, setEditingNote] = useState<PageNote | null>(null);
   const [title, setTitle] = useState(savedState.title || pageTitle);
   const [content, setContent] = useState(savedState.content);
   const [urlMatchType, setUrlMatchType] = useState<UrlMatchType>(
@@ -404,6 +435,29 @@ function CurrentPageTab({
     preselectLastCategory ? savedState.categoryId : ''
   );
   const [matchUrl, setMatchUrl] = useState<string>(savedState.matchUrl || url);
+  
+  // Reminder state
+  const [hasReminder, setHasReminder] = useState(false);
+  const [scheduleType, setScheduleType] = useState<ScheduleType>('once');
+  const [scheduledTime, setScheduledTime] = useState<number | null>(null);
+  const [recurringPattern, setRecurringPattern] = useState<RecurringPattern | null>(null);
+  
+  // Recurring reminder state
+  const [recFrequency, setRecFrequency] = useState<FrequencyType>('daily');
+  const [recInterval, setRecInterval] = useState(1);
+  const [recWeekdays, setRecWeekdays] = useState<number[]>([1]); // Mon default
+  const [recDayOfMonth, setRecDayOfMonth] = useState(1);
+  const [recMonthlyMode, setRecMonthlyMode] = useState<'day' | 'weekday'>('day');
+  const [recOrdinal, setRecOrdinal] = useState(1);
+  const [recOrdinalWeekday, setRecOrdinalWeekday] = useState(1);
+  const [recEndType, setRecEndType] = useState<'never' | 'date' | 'count'>('never');
+  const [recEndDate, setRecEndDate] = useState('');
+  const [recEndCount, setRecEndCount] = useState(10);
+  const now = new Date();
+  const defaultHour = now.getMinutes() >= 59 ? (now.getHours() + 1) % 24 : now.getHours();
+  const defaultMinute = (now.getMinutes() + 1) % 60;
+  const [recTimeHour, setRecTimeHour] = useState(defaultHour);
+  const [recTimeMinute, setRecTimeMinute] = useState(defaultMinute);
 
   useEffect(() => {
     if (editingNote) {
@@ -412,11 +466,51 @@ function CurrentPageTab({
       setUrlMatchType(editingNote.urlMatchType);
       setCategoryId(editingNote.categoryId || '');
       setMatchUrl(editingNote.url);
+      // Load reminder fields if present
+      setHasReminder(editingNote.hasReminder || false);
+      setScheduleType(editingNote.scheduleType || 'once');
+      setScheduledTime(editingNote.scheduledTime || null);
+      setRecurringPattern(editingNote.recurringPattern || null);
+      
+      // Load recurring pattern if present
+      if (editingNote.recurringPattern) {
+        const p = editingNote.recurringPattern;
+        setRecFrequency(p.frequency);
+        setRecInterval(p.interval);
+        setRecWeekdays(p.weekdays || [1]);
+        setRecDayOfMonth(p.dayOfMonth || 1);
+        setRecMonthlyMode(p.dayOfMonth ? 'day' : 'weekday');
+        setRecOrdinal(p.weekdayOrdinal?.ordinal || 1);
+        setRecOrdinalWeekday(p.weekdayOrdinal?.weekday || 1);
+        setRecEndType(p.endCondition.type);
+        setRecEndDate(p.endCondition.type === 'date' ? new Date(p.endCondition.endDate!).toISOString().slice(0, 10) : '');
+        setRecEndCount(p.endCondition.type === 'count' ? p.endCondition.occurrences! : 10);
+        setRecTimeHour(p.timeOfDay?.hour ?? defaultHour);
+        setRecTimeMinute(p.timeOfDay?.minute ?? defaultMinute);
+      }
     } else {
       if (!savedState.title && pageTitle) {
         setTitle(pageTitle);
       }
       setMatchUrl(url);
+      // Reset reminder fields
+      setHasReminder(false);
+      setScheduleType('once');
+      setScheduledTime(null);
+      setRecurringPattern(null);
+      // Reset recurring state
+      setRecFrequency('daily');
+      setRecInterval(1);
+      setRecWeekdays([1]);
+      setRecDayOfMonth(1);
+      setRecMonthlyMode('day');
+      setRecOrdinal(1);
+      setRecOrdinalWeekday(1);
+      setRecEndType('never');
+      setRecEndDate('');
+      setRecEndCount(10);
+      setRecTimeHour(defaultHour);
+      setRecTimeMinute(defaultMinute);
     }
   }, [editingNote, url, pageTitle]);
 
@@ -432,8 +526,36 @@ function CurrentPageTab({
     );
   }
 
+  function buildRecurringPattern(): RecurringPattern {
+    let endCondition: EndCondition = { type: 'never' };
+    if (recEndType === 'date' && recEndDate) {
+      endCondition = { type: 'date', endDate: new Date(recEndDate).getTime() };
+    } else if (recEndType === 'count') {
+      endCondition = { type: 'count', occurrences: recEndCount };
+    }
+
+    const pattern: RecurringPattern = {
+      frequency: recFrequency,
+      interval: recInterval,
+      endCondition,
+      timeOfDay: { hour: recTimeHour, minute: recTimeMinute },
+    };
+
+    if (recFrequency === 'weekly') {
+      pattern.weekdays = recWeekdays;
+    } else if (recFrequency === 'monthly') {
+      if (recMonthlyMode === 'day') {
+        pattern.dayOfMonth = recDayOfMonth;
+      } else {
+        pattern.weekdayOrdinal = { ordinal: recOrdinal, weekday: recOrdinalWeekday };
+      }
+    }
+
+    return pattern;
+  }
+
   function handleSave() {
-    const updatedNote = editingNote
+    const baseNote = editingNote
       ? {
           ...editingNote,
           url: matchUrl,
@@ -444,25 +566,57 @@ function CurrentPageTab({
           updatedAt: Date.now(),
         }
       : createNote(matchUrl, title, content, urlMatchType, categoryId || null);
+    
+    // Add reminder fields if reminder is enabled
+    let finalScheduledTime = scheduledTime;
+    let finalRecurringPattern = recurringPattern;
+    
+    if (hasReminder && scheduleType === 'recurring') {
+      // Build recurring pattern from state
+      finalRecurringPattern = buildRecurringPattern();
+      finalScheduledTime = calculateNextTrigger(finalRecurringPattern);
+    }
+    
+    const updatedNote: PageNote = {
+      ...baseNote,
+      hasReminder,
+      scheduleType: hasReminder ? scheduleType : undefined,
+      scheduledTime: hasReminder ? finalScheduledTime : undefined,
+      recurringPattern: hasReminder ? finalRecurringPattern : undefined,
+      nextTrigger: hasReminder && finalScheduledTime ? finalScheduledTime : undefined,
+    };
+    
     onSave(updatedNote);
-    setEditingNote(null);
+    onCancelEdit();
     setTitle(pageTitle);
     setContent('');
+    setHasReminder(false);
+    setScheduleType('once');
+    setScheduledTime(null);
+    setRecurringPattern(null);
   }
 
   function resetUrlTo(type: UrlMatchType) {
     setUrlMatchType(type);
-    setMatchUrl(url);
+    if (type === 'regex') {
+      // For regex, clear the URL so user can enter pattern
+      setMatchUrl('');
+    } else {
+      // For other types, use current page URL
+      setMatchUrl(url);
+    }
   }
 
   return (
-    <div>
-      {/* Existing notes for this page */}
-      {matchingNotes.length > 0 && (
-        <div style={{ marginBottom: '16px', paddingBottom: '12px', borderBottom: '2px solid #ddd' }}>
-          <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
-            📝 Notes for this page ({matchingNotes.length})
-          </div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Notes list - takes available space */}
+      <div style={{ flex: 1, overflow: 'auto', marginBottom: '16px' }}>
+        {/* Existing notes for this page */}
+        {matchingNotes.length > 0 && (
+          <div style={{ marginBottom: '16px', paddingBottom: '12px', borderBottom: '2px solid #ddd' }}>
+            <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
+              📝 Notes for this page ({matchingNotes.length})
+            </div>
           {matchingNotes.map((note) => {
             const category = categories.find((c) => c.id === note.categoryId);
             return (
@@ -476,12 +630,12 @@ function CurrentPageTab({
                   display: 'flex',
                   gap: '8px',
                   alignItems: 'flex-start',
-                  backgroundColor: '#e3f2fd',
+                  backgroundColor: category ? getLightColor(category.color, 0.15) : '#f5f5f5',
                   borderLeft: category ? `4px solid ${category.color}` : 'none',
                   paddingLeft: category ? '8px' : '12px',
                 }}
               >
-                <div style={{ fontSize: '14px', marginTop: '2px' }}>📝</div>
+                <div style={{ fontSize: '14px', marginTop: '2px' }}>{note.hasReminder ? '🔔' : '📝'}</div>
                 <div style={{ flex: 1, minWidth: 0 }} title={getNoteTooltip(note)}>
                   <div
                     title={note.title || 'Untitled'}
@@ -567,7 +721,7 @@ function CurrentPageTab({
                     </div>
                     <div style={{ display: 'flex', gap: '4px' }}>
                       <button
-                        onClick={() => setEditingNote(note)}
+                        onClick={() => onEditNote(note)}
                         className="icon-btn"
                         title="Edit"
                         style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', fontSize: '14px', color: '#4a90d9' }}
@@ -611,7 +765,7 @@ function CurrentPageTab({
                   display: 'flex',
                   gap: '8px',
                   alignItems: 'flex-start',
-                  backgroundColor: '#e3f2fd',
+                  backgroundColor: category ? getLightColor(category.color, 0.15) : '#f5f5f5',
                   borderLeft: category ? `4px solid ${category.color}` : 'none',
                   paddingLeft: category ? '8px' : '12px',
                 }}
@@ -720,29 +874,31 @@ function CurrentPageTab({
           })}
         </div>
       )}
-
-      {/* Note form */}
-      <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
-        {editingNote ? '✏️ Edit Note' : '➕ Add New Note'}
-        {editingNote && (
-          <button
-            onClick={() => { setEditingNote(null); setTitle(pageTitle); setContent(''); }}
-            style={{ marginLeft: '8px', fontSize: '11px', color: '#4a90d9', background: 'none', border: 'none', cursor: 'pointer' }}
-          >
-            Cancel edit
-          </button>
-        )}
       </div>
+
+      {/* Note form - sticky at bottom */}
+      <div style={{ flexShrink: 0, borderTop: '2px solid #ddd', paddingTop: '12px' }}>
+        <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
+          {editingNote ? '✏️ Edit Note' : '➕ Add New Note'}
+          {editingNote && (
+            <button
+              onClick={() => { onCancelEdit(); setTitle(pageTitle); setContent(''); }}
+              style={{ marginLeft: '8px', fontSize: '11px', color: '#4a90d9', background: 'none', border: 'none', cursor: 'pointer' }}
+            >
+              Cancel edit
+            </button>
+          )}
+        </div>
 
       <div style={{ marginBottom: '12px' }}>
         <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>
-          Match URL
+          {urlMatchType === 'regex' ? 'Regex Pattern' : 'Match URL'}
         </label>
         <input
           type="text"
           value={matchUrl}
           onChange={(e) => setMatchUrl(e.target.value)}
-          placeholder="URL to match..."
+          placeholder={urlMatchType === 'regex' ? 'e.g., ^https://.*\\.example\\.com/.*$' : 'URL to match...'}
           style={{
             width: '100%',
             padding: '8px',
@@ -753,7 +909,7 @@ function CurrentPageTab({
           }}
         />
         <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
-          {(['exact', 'path', 'domain'] as UrlMatchType[]).map((type) => (
+          {(['exact', 'path', 'domain', 'regex'] as UrlMatchType[]).map((type) => (
             <button
               key={type}
               onClick={() => resetUrlTo(type)}
@@ -829,7 +985,7 @@ function CurrentPageTab({
       </div>
 
       <div style={{ marginBottom: '16px' }}>
-        <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>
+        <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', color: '#666' }}>
           Category
         </label>
         <select
@@ -842,687 +998,92 @@ function CurrentPageTab({
             borderRadius: '4px',
           }}
         >
-          <option value="">⬜ No category</option>
+          <option value="">No category</option>
           {categories.map((cat) => (
-            <option key={cat.id} value={cat.id} style={{ color: cat.color }}>
-              ● {cat.name}
+            <option key={cat.id} value={cat.id}>
+              {cat.name}
             </option>
           ))}
         </select>
       </div>
 
-      <div style={{ display: 'flex', gap: '8px' }}>
-        <button
-          onClick={handleSave}
-          disabled={!content.trim()}
-          style={{
-            flex: 1,
-            padding: '10px',
-            backgroundColor: '#4a90d9',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: content.trim() ? 'pointer' : 'not-allowed',
-            opacity: content.trim() ? 1 : 0.5,
-          }}
-        >
-          {editingNote ? 'Update Note' : 'Save Note'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-interface NotesListTabProps {
-  notes: PageNote[];
-  categories: Category[];
-  filterCategory: string;
-  currentUrl: string;
-  onFilterChange: (category: string) => void;
-  onDelete: (id: string) => void;
-}
-
-function NotesListTab({
-  notes,
-  categories,
-  filterCategory,
-  currentUrl,
-  onFilterChange,
-  onDelete,
-}: NotesListTabProps) {
-  const filteredNotes =
-    filterCategory === 'all'
-      ? notes
-      : notes.filter((n) => n.categoryId === filterCategory);
-
-  function openNote(url: string) {
-    // Find existing tab with URL or open new tab
-    browser.tabs.query({ url }).then((tabs) => {
-      if (tabs.length > 0 && tabs[0].id) {
-        browser.tabs.update(tabs[0].id, { active: true }).then(() => {
-          if (tabs[0].windowId) {
-            browser.windows.update(tabs[0].windowId, { focused: true });
-          }
-        });
-      } else {
-        browser.tabs.create({ url });
-      }
-    });
-  }
-
-  function isCurrentPageNote(note: PageNote): boolean {
-    if (!currentUrl || currentUrl.startsWith('about:') || currentUrl.startsWith('moz-extension:')) {
-      return false;
-    }
-    try {
-      const noteUrl = new URL(note.url);
-      const pageUrl = new URL(currentUrl);
-      switch (note.urlMatchType) {
-        case 'exact':
-          return note.url === currentUrl;
-        case 'path':
-          return noteUrl.hostname === pageUrl.hostname && noteUrl.pathname === pageUrl.pathname;
-        case 'domain':
-          return noteUrl.hostname === pageUrl.hostname;
-        default:
-          return false;
-      }
-    } catch {
-      return false;
-    }
-  }
-
-  return (
-    <div>
+      {/* Reminder toggle */}
       <div style={{ marginBottom: '12px' }}>
-        <select
-          value={filterCategory}
-          onChange={(e) => onFilterChange(e.target.value)}
-          style={{
-            width: '100%',
-            padding: '8px',
-            border: '1px solid #ddd',
-            borderRadius: '4px',
-          }}
-        >
-          <option value="all">All categories</option>
-          {categories.map((cat) => (
-            <option key={cat.id} value={cat.id} style={{ color: cat.color }}>
-              ● {cat.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {filteredNotes.length === 0 ? (
-        <div style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
-          No notes found.
-        </div>
-      ) : (
-        <div>
-          {filteredNotes.map((note) => {
-            const category = categories.find((c) => c.id === note.categoryId);
-            const isForCurrentPage = isCurrentPageNote(note);
-            return (
-              <div
-                key={note.id}
-                className="hover-item"
-                style={{
-                  padding: '8px',
-                  marginBottom: '4px',
-                  borderRadius: '4px',
-                  display: 'flex',
-                  gap: '8px',
-                  alignItems: 'flex-start',
-                  backgroundColor: isForCurrentPage ? '#e3f2fd' : '#fff',
-                  borderLeft: category ? `4px solid ${category.color}` : 'none',
-                  paddingLeft: category ? '8px' : '12px',
-                }}
-              >
-                <div style={{ fontSize: '14px', marginTop: '2px' }}>📝</div>
-                <div style={{ flex: 1, minWidth: 0 }} title={getNoteTooltip(note)}>
-                  <div
-                    title={note.title || 'Untitled'}
-                    onClick={() => openNote(note.url)}
-                    style={{
-                      fontWeight: 600,
-                      marginBottom: '4px',
-                      cursor: 'pointer',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {note.title || 'Untitled'}
-                  </div>
-                  <div
-                    title={getDisplayUrl(note)}
-                    style={{
-                      fontSize: '11px',
-                      color: '#999',
-                      marginBottom: '4px',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {getDisplayUrl(note)}
-                  </div>
-                  {note.content && (
-                    <div
-                      style={{
-                        fontSize: '11px',
-                        color: '#666',
-                        marginBottom: '4px',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {note.content.substring(0, 80)}{note.content.length > 80 ? '...' : ''}
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                      {category && (
-                        <span
-                          style={{
-                            fontSize: '10px',
-                            padding: '2px 6px',
-                            borderRadius: '10px',
-                            backgroundColor: category.color + '20',
-                            color: category.color,
-                          }}
-                        >
-                          {category.name}
-                        </span>
-                      )}
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          padding: '2px 6px',
-                          borderRadius: '10px',
-                          backgroundColor: '#f5f5f5',
-                          color: '#666',
-                          textTransform: 'uppercase',
-                        }}
-                      >
-                        {note.urlMatchType}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', gap: '4px' }}>
-                      <button
-                        onClick={() => openNote(note.url)}
-                        title="Open page"
-                        className="icon-btn"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#4a90d9',
-                          cursor: 'pointer',
-                          padding: '2px',
-                          fontSize: '14px',
-                        }}
-                      >
-                        🔗
-                      </button>
-                      <button
-                        onClick={() => onDelete(note.id)}
-                        title="Delete note"
-                        className="icon-btn"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#e53935',
-                          cursor: 'pointer',
-                          padding: '2px',
-                          fontSize: '14px',
-                        }}
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface ReminderFormState {
-  title: string;
-  timeInput: string;
-  categoryId: string;
-  matchUrl: string;
-}
-
-type ScheduleMode = 'once' | 'recurring' | 'relative';
-
-interface RemindersTabProps {
-  reminders: TimeReminder[];
-  categories: Category[];
-  currentUrl: string;
-  savedState: ReminderFormState;
-  onStateChange: (state: ReminderFormState) => void;
-  onAdd: (reminder: TimeReminder) => void;
-  onDelete: (id: string) => void;
-  onClearOverdue: () => void;
-}
-
-function RemindersTab({
-  reminders,
-  categories,
-  currentUrl,
-  savedState,
-  onStateChange,
-  onAdd,
-  onDelete,
-  onClearOverdue,
-}: RemindersTabProps) {
-  const [title, setTitle] = useState(savedState.title);
-  const [timeInput, setTimeInput] = useState(savedState.timeInput);
-  const [categoryId, setCategoryId] = useState(savedState.categoryId);
-  const [matchUrl, setMatchUrl] = useState(savedState.matchUrl || currentUrl);
-  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('relative');
-  const [error, setError] = useState('');
-  const [expandedReminder, setExpandedReminder] = useState<string | null>(null);
-
-  // Evolution-style recurrence state
-  const [recFrequency, setRecFrequency] = useState<FrequencyType>('daily');
-  const [recInterval, setRecInterval] = useState(1);
-  const [recWeekdays, setRecWeekdays] = useState<number[]>([1]); // Mon default
-  const [recDayOfMonth, setRecDayOfMonth] = useState(1);
-  const [recMonthlyMode, setRecMonthlyMode] = useState<'day' | 'weekday'>('day');
-  const [recOrdinal, setRecOrdinal] = useState(1);
-  const [recOrdinalWeekday, setRecOrdinalWeekday] = useState(1);
-  const [recEndType, setRecEndType] = useState<'never' | 'date' | 'count'>('never');
-  const [recEndDate, setRecEndDate] = useState('');
-  const [recEndCount, setRecEndCount] = useState(10);
-  const now = new Date();
-  const defaultHour = now.getMinutes() >= 59 ? (now.getHours() + 1) % 24 : now.getHours();
-  const defaultMinute = (now.getMinutes() + 1) % 60;
-  const [recTimeHour, setRecTimeHour] = useState(defaultHour);
-  const [recTimeMinute, setRecTimeMinute] = useState(defaultMinute);
-
-  useEffect(() => {
-    setMatchUrl(currentUrl);
-  }, [currentUrl]);
-
-  useEffect(() => {
-    onStateChange({ title, timeInput, categoryId, matchUrl });
-  }, [title, timeInput, categoryId, matchUrl]);
-
-  const canAddReminder =
-    currentUrl && !currentUrl.startsWith('about:') && !currentUrl.startsWith('moz-extension:');
-
-  function buildRecurringPattern(): RecurringPattern {
-    let endCondition: EndCondition = { type: 'never' };
-    if (recEndType === 'date' && recEndDate) {
-      endCondition = { type: 'date', endDate: new Date(recEndDate).getTime() };
-    } else if (recEndType === 'count') {
-      endCondition = { type: 'count', occurrences: recEndCount };
-    }
-
-    const pattern: RecurringPattern = {
-      frequency: recFrequency,
-      interval: recInterval,
-      endCondition,
-      timeOfDay: { hour: recTimeHour, minute: recTimeMinute },
-    };
-
-    if (recFrequency === 'weekly') {
-      pattern.weekdays = recWeekdays;
-    } else if (recFrequency === 'monthly') {
-      if (recMonthlyMode === 'day') {
-        pattern.dayOfMonth = recDayOfMonth;
-      } else {
-        pattern.weekdayOrdinal = { ordinal: recOrdinal, weekday: recOrdinalWeekday };
-      }
-    }
-
-    return pattern;
-  }
-
-  function handleAdd() {
-    let nextTrigger: number;
-    let recurringPattern: RecurringPattern | null = null;
-    let isRecurring = false;
-
-    if (scheduleMode === 'recurring') {
-      recurringPattern = buildRecurringPattern();
-      nextTrigger = calculateNextTrigger(recurringPattern);
-      isRecurring = true;
-    } else if (timeInput.trim()) {
-      const parsed = parseTimeInput(timeInput);
-      if (!parsed) {
-        setError('Please configure a valid schedule');
-        return;
-      }
-      nextTrigger = parsed.timestamp;
-      isRecurring = parsed.isRecurring;
-      recurringPattern = parsed.recurringPattern;
-    } else {
-      setError('Please configure a valid schedule');
-      return;
-    }
-
-    const reminder = createReminder(
-      matchUrl || currentUrl,
-      title || `Reminder for ${new URL(matchUrl || currentUrl).hostname}`,
-      nextTrigger,
-      categoryId || null
-    );
-
-    if (isRecurring && recurringPattern) {
-      reminder.scheduleType = 'recurring';
-      reminder.recurringPattern = recurringPattern;
-    }
-
-    onAdd(reminder);
-    setTitle('');
-    setTimeInput('');
-    setCategoryId('');
-    setMatchUrl(currentUrl);
-    setError('');
-  }
-
-  function openUrl(url: string) {
-    // Find existing tab with URL or open new tab
-    browser.tabs.query({ url }).then((tabs) => {
-      if (tabs.length > 0 && tabs[0].id) {
-        browser.tabs.update(tabs[0].id, { active: true }).then(() => {
-          if (tabs[0].windowId) {
-            browser.windows.update(tabs[0].windowId, { focused: true });
-          }
-        });
-      } else {
-        browser.tabs.create({ url });
-      }
-    });
-  }
-
-  const sortedReminders = [...reminders].sort((a, b) => a.nextTrigger - b.nextTrigger);
-
-  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const ordinalLabels = ['1st', '2nd', '3rd', '4th', 'Last'];
-
-  const onceOptions = [
-    { value: '', label: 'Select a time...' },
-    { value: 'tomorrow 9am', label: 'Tomorrow morning (9 AM)' },
-    { value: 'tomorrow 2pm', label: 'Tomorrow afternoon (2 PM)' },
-    { value: 'next monday 9am', label: 'Next Monday (9 AM)' },
-    { value: 'next friday 5pm', label: 'Next Friday (5 PM)' },
-  ];
-
-  const relativeOptions = [
-    { value: '', label: 'Select duration...' },
-    { value: 'in 1 minute', label: 'In 1 minute' },
-    { value: 'in 5 minutes', label: 'In 5 minutes' },
-    { value: 'in 15 minutes', label: 'In 15 minutes' },
-    { value: 'in 30 minutes', label: 'In 30 minutes' },
-    { value: 'in 1 hour', label: 'In 1 hour' },
-    { value: 'in 2 hours', label: 'In 2 hours' },
-    { value: 'in 4 hours', label: 'In 4 hours' },
-    { value: 'in 1 day', label: 'In 1 day' },
-  ];
-
-  const modeLabels: Record<ScheduleMode, string> = {
-    once: 'One time',
-    recurring: 'Recurring',
-    relative: 'From now',
-  };
-
-  return (
-    <div>
-      {/* List existing reminders first */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-        <div style={{ fontSize: '12px', fontWeight: 600, color: '#666' }}>
-          Scheduled Reminders
-        </div>
-        {reminders.filter((r) => r.nextTrigger <= Date.now()).length > 0 && (
-          <button
-            onClick={onClearOverdue}
-            className="icon-btn"
-            style={{
-              padding: '4px 8px',
-              backgroundColor: '#e53935',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '11px',
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={hasReminder}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              setHasReminder(enabled);
+              // Set default time 1 hour from now when enabling reminder
+              if (enabled && !scheduledTime) {
+                const defaultTime = Date.now() + 60 * 60 * 1000; // 1 hour from now
+                setScheduledTime(defaultTime);
+              }
             }}
-          >
-            Clear Overdue
-          </button>
-        )}
-      </div>
-
-      {sortedReminders.length === 0 ? (
-        <div style={{ color: '#666', textAlign: 'center', padding: '20px', fontSize: '12px' }}>
-          No reminders scheduled.
-        </div>
-      ) : (
-        <div style={{ maxHeight: '250px', overflow: 'auto', marginBottom: '16px', paddingBottom: '16px', borderBottom: '2px solid #ddd' }}>
-          {sortedReminders.map((reminder) => {
-            const category = categories.find((c) => c.id === reminder.categoryId);
-            const isOverdue = reminder.nextTrigger <= Date.now();
-            const isForCurrentPage = currentUrl && reminder.url.includes(new URL(currentUrl).hostname);
-            return (
-              <div
-                key={reminder.id}
-                style={{
-                  padding: '8px',
-                  marginBottom: '4px',
-                  borderRadius: '4px',
-                  display: 'flex',
-                  gap: '8px',
-                  alignItems: 'flex-start',
-                  backgroundColor: isForCurrentPage ? '#e3f2fd' : '#fff',
-                  borderLeft: category ? `4px solid ${category.color}` : 'none',
-                  paddingLeft: category ? '8px' : '12px',
-                }}
-              >
-                <div style={{ fontSize: '14px', marginTop: '2px' }}>⌚</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    title={reminder.title}
-                    onClick={() => openUrl(reminder.url)}
-                    style={{
-                      fontWeight: 600,
-                      marginBottom: '4px',
-                      cursor: 'pointer',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {reminder.title}
-                  </div>
-                  <div
-                    title={reminder.url}
-                    style={{
-                      fontSize: '11px',
-                      color: '#999',
-                      marginBottom: '4px',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {reminder.url}
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                      {isOverdue && (
-                        <span
-                          style={{
-                            fontSize: '10px',
-                            padding: '2px 6px',
-                            borderRadius: '10px',
-                            backgroundColor: '#ffebee',
-                            color: '#e53935',
-                          }}
-                        >
-                          Overdue
-                        </span>
-                      )}
-                      {reminder.scheduleType === 'recurring' && (
-                        <span
-                          style={{
-                            fontSize: '10px',
-                            padding: '2px 6px',
-                            borderRadius: '10px',
-                            backgroundColor: '#e3f2fd',
-                            color: '#1976d2',
-                            cursor: 'pointer',
-                          }}
-                          onClick={() => setExpandedReminder(
-                            expandedReminder === reminder.id ? null : reminder.id
-                          )}
-                        >
-                          Recurring {expandedReminder === reminder.id ? '▲' : '▼'}
-                        </span>
-                      )}
-                      {category && (
-                        <span
-                          style={{
-                            fontSize: '10px',
-                            padding: '2px 6px',
-                            borderRadius: '10px',
-                            backgroundColor: category.color + '20',
-                            color: category.color,
-                          }}
-                        >
-                          {category.name}
-                        </span>
-                      )}
-                      <span style={{ fontSize: '11px', color: isOverdue ? '#e53935' : '#666' }}>
-                        {formatRelativeTime(reminder.nextTrigger)}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', gap: '4px' }}>
-                      <button
-                        onClick={() => openUrl(reminder.url)}
-                        title="Open page"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#4a90d9',
-                          cursor: 'pointer',
-                          padding: '2px',
-                          fontSize: '14px',
-                        }}
-                      >
-                        🔗
-                      </button>
-                      <button
-                        onClick={() => onDelete(reminder.id)}
-                        title="Delete reminder"
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#e53935',
-                          cursor: 'pointer',
-                          padding: '2px',
-                          fontSize: '14px',
-                        }}
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  </div>
-                  {expandedReminder === reminder.id && reminder.recurringPattern && (
-                    <div style={{ marginTop: '8px', fontSize: '11px', color: '#666' }}>
-                      <div style={{ fontWeight: 500, marginBottom: '4px' }}>Next occurrences:</div>
-                      {getNextOccurrences(reminder.recurringPattern, 5).map((ts, i) => (
-                        <div key={i} style={{ marginLeft: '8px' }}>
-                          • {formatDate(new Date(ts))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Add new reminder form */}
-      {canAddReminder && (
-        <div style={{ marginBottom: '16px', paddingBottom: '16px', borderBottom: '2px solid #ddd' }}>
-          <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '12px' }}>
-            Add New Reminder
-          </div>
-          <div style={{ marginBottom: '8px' }}>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>
-              URL
-            </label>
-            <input
-              type="text"
-              value={matchUrl}
-              onChange={(e) => setMatchUrl(e.target.value)}
-              placeholder="URL for reminder..."
-              style={{
-                width: '100%',
-                padding: '8px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                boxSizing: 'border-box',
-                fontSize: '11px',
-              }}
-            />
-          </div>
-
-          <div style={{ marginBottom: '8px' }}>
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Reminder title (optional)"
-              style={{
-                width: '100%',
-                padding: '8px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                boxSizing: 'border-box',
-              }}
-            />
-          </div>
-
-          <div style={{ marginBottom: '8px' }}>
-            <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
-              {(['once', 'recurring', 'relative'] as ScheduleMode[]).map((mode) => (
+          />
+          <span style={{ fontSize: '13px', fontWeight: 500 }}>⏰ Add reminder for this note</span>
+        </label>
+        
+        {hasReminder && (
+          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '4px', border: '1px solid #e0e0e0' }}>
+            {/* Schedule type selector */}
+            <div style={{ marginBottom: '12px' }}>
+              <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
                 <button
-                  key={mode}
-                  onClick={() => {
-                    setScheduleMode(mode);
-                    setTimeInput('');
-                    setError('');
-                  }}
+                  onClick={() => setScheduleType('once')}
                   style={{
                     flex: 1,
                     padding: '6px 8px',
                     border: '1px solid #ddd',
                     borderRadius: '4px',
-                    background: scheduleMode === mode ? '#4a90d9' : '#fff',
-                    color: scheduleMode === mode ? '#fff' : '#333',
+                    background: scheduleType === 'once' ? '#4a90d9' : '#fff',
+                    color: scheduleType === 'once' ? '#fff' : '#333',
                     cursor: 'pointer',
                     fontSize: '11px',
-                    fontWeight: scheduleMode === mode ? 600 : 400,
+                    fontWeight: scheduleType === 'once' ? 600 : 400,
                   }}
                 >
-                  {modeLabels[mode]}
+                  One-time
                 </button>
-              ))}
+                <button
+                  onClick={() => setScheduleType('recurring')}
+                  style={{
+                    flex: 1,
+                    padding: '6px 8px',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    background: scheduleType === 'recurring' ? '#4a90d9' : '#fff',
+                    color: scheduleType === 'recurring' ? '#fff' : '#333',
+                    cursor: 'pointer',
+                    fontSize: '11px',
+                    fontWeight: scheduleType === 'recurring' ? 600 : 400,
+                  }}
+                >
+                  Recurring
+                </button>
+              </div>
             </div>
 
-            {scheduleMode === 'recurring' ? (
+            {scheduleType === 'once' ? (
+              <div style={{ marginBottom: '8px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>
+                  When to remind
+                </label>
+                <DateTimePicker
+                  value={scheduledTime ? new Date(scheduledTime) : null}
+                  onChange={(date: Date | null) => {
+                    setScheduledTime(date ? date.getTime() : null);
+                  }}
+                  disableClock={true}
+                  clearIcon={null}
+                  calendarIcon={null}
+                  format="y-MM-dd HH:mm"
+                  className="datetime-picker-custom"
+                />
+              </div>
+            ) : (
               <div style={{ fontSize: '12px' }}>
                 {/* Frequency + Interval */}
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
@@ -1554,7 +1115,7 @@ function RemindersTab({
                   <div style={{ marginBottom: '8px' }}>
                     <div style={{ marginBottom: '4px' }}>On:</div>
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                      {dayNames.map((day, idx) => (
+                      {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, idx) => (
                         <label key={idx} style={{ display: 'flex', alignItems: 'center', gap: '2px', fontSize: '11px' }}>
                           <input
                             type="checkbox"
@@ -1599,7 +1160,7 @@ function RemindersTab({
                         disabled={recMonthlyMode !== 'weekday'}
                         style={{ padding: '4px', border: '1px solid #ddd', borderRadius: '4px' }}
                       >
-                        {ordinalLabels.map((lbl, idx) => (
+                        {['1st', '2nd', '3rd', '4th', 'Last'].map((lbl, idx) => (
                           <option key={idx} value={idx + 1}>{lbl}</option>
                         ))}
                       </select>
@@ -1609,7 +1170,7 @@ function RemindersTab({
                         disabled={recMonthlyMode !== 'weekday'}
                         style={{ padding: '4px', border: '1px solid #ddd', borderRadius: '4px' }}
                       >
-                        {dayNames.map((day, idx) => (
+                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, idx) => (
                           <option key={idx} value={idx}>{day}</option>
                         ))}
                       </select>
@@ -1686,103 +1247,563 @@ function RemindersTab({
                   📅 {describeRecurringPattern(buildRecurringPattern())}
                 </div>
               </div>
-            ) : (
-              <select
-                value={timeInput}
-                onChange={(e) => {
-                  setTimeInput(e.target.value);
-                  setError('');
-                }}
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button
+          onClick={handleSave}
+          disabled={!content.trim()}
+          style={{
+            flex: 1,
+            padding: '10px',
+            backgroundColor: '#4a90d9',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: content.trim() ? 'pointer' : 'not-allowed',
+            opacity: content.trim() ? 1 : 0.5,
+          }}
+        >
+          {editingNote ? 'Update Note' : 'Save Note'}
+        </button>
+      </div>
+      </div>
+    </div>
+  );
+}
+
+interface NotesListTabProps {
+  notes: PageNote[];
+  categories: Category[];
+  filterCategory: string;
+  currentUrl: string;
+  onFilterChange: (category: string) => void;
+  onDelete: (id: string) => void;
+  onEdit: (note: PageNote) => void;
+}
+
+function NotesListTab({
+  notes,
+  categories,
+  filterCategory,
+  currentUrl,
+  onFilterChange,
+  onDelete,
+  onEdit,
+}: NotesListTabProps) {
+  const filteredNotes =
+    filterCategory === 'all'
+      ? notes
+      : notes.filter((n) => n.categoryId === filterCategory);
+
+  function openNote(url: string) {
+    // Find existing tab with URL or open new tab
+    browser.tabs.query({ url }).then((tabs) => {
+      if (tabs.length > 0 && tabs[0].id) {
+        browser.tabs.update(tabs[0].id, { active: true }).then(() => {
+          if (tabs[0].windowId) {
+            browser.windows.update(tabs[0].windowId, { focused: true });
+          }
+        });
+      } else {
+        browser.tabs.create({ url });
+      }
+    });
+  }
+
+  function isCurrentPageNote(note: PageNote): boolean {
+    if (!currentUrl || currentUrl.startsWith('about:') || currentUrl.startsWith('moz-extension:')) {
+      return false;
+    }
+    try {
+      const noteUrl = new URL(note.url);
+      const pageUrl = new URL(currentUrl);
+      switch (note.urlMatchType) {
+        case 'exact':
+          return note.url === currentUrl;
+        case 'path':
+          return noteUrl.hostname === pageUrl.hostname && noteUrl.pathname === pageUrl.pathname;
+        case 'domain':
+          return noteUrl.hostname === pageUrl.hostname;
+        default:
+          return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ marginBottom: '12px', flexShrink: 0 }}>
+        <select
+          value={filterCategory}
+          onChange={(e) => onFilterChange(e.target.value)}
+          style={{
+            width: '100%',
+            padding: '8px',
+            border: '1px solid #ddd',
+            borderRadius: '4px',
+          }}
+        >
+          <option value="all">All categories</option>
+          {categories.map((cat) => (
+            <option key={cat.id} value={cat.id}>
+              {cat.name}
+            </option>
+          ))}
+        </select>
+        {filterCategory !== 'all' && (() => {
+          const selectedCat = categories.find(c => c.id === filterCategory);
+          return selectedCat?.lastSyncTime ? (
+            <div style={{ fontSize: '11px', color: '#666', marginTop: '4px', paddingLeft: '4px' }}>
+              Last synced: {formatRelativeTime(selectedCat.lastSyncTime)}
+            </div>
+          ) : null;
+        })()}
+      </div>
+
+      {filteredNotes.length === 0 ? (
+        <div style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
+          No notes found.
+        </div>
+      ) : (
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {filteredNotes.map((note) => {
+            const category = categories.find((c) => c.id === note.categoryId);
+            const isForCurrentPage = isCurrentPageNote(note);
+            return (
+              <div
+                key={note.id}
+                className="hover-item"
                 style={{
-                  width: '100%',
                   padding: '8px',
-                  border: `1px solid ${error ? '#e53935' : '#ddd'}`,
+                  marginBottom: '4px',
                   borderRadius: '4px',
-                  boxSizing: 'border-box',
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'flex-start',
+                  backgroundColor: category ? getLightColor(category.color, isForCurrentPage ? 0.25 : 0.1) : (isForCurrentPage ? '#f0f0f0' : '#fff'),
+                  borderLeft: category ? `4px solid ${category.color}` : 'none',
+                  paddingLeft: category ? '8px' : '12px',
                 }}
               >
-                {(scheduleMode === 'once' ? onceOptions : relativeOptions).map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {scheduleMode !== 'recurring' && (
-              <div style={{ marginTop: '4px', fontSize: '11px', color: '#666' }}>
-                Or type: <input
-                  type="text"
-                  value={timeInput}
-                  onChange={(e) => {
-                    setTimeInput(e.target.value);
-                    setError('');
-                  }}
-                  placeholder="e.g., next tuesday 3pm"
-                  style={{
-                    padding: '4px',
-                    border: '1px solid #ddd',
-                    borderRadius: '4px',
-                    fontSize: '11px',
-                    width: '150px',
-                  }}
-                />
+                <div style={{ fontSize: '14px', marginTop: '2px' }}>{note.hasReminder ? '🔔' : '📝'}</div>
+                <div style={{ flex: 1, minWidth: 0 }} title={getNoteTooltip(note)}>
+                  <div
+                    title={note.title || 'Untitled'}
+                    onClick={() => openNote(note.url)}
+                    style={{
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                      cursor: 'pointer',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {note.title || 'Untitled'}
+                  </div>
+                  <div
+                    title={getDisplayUrl(note)}
+                    style={{
+                      fontSize: '11px',
+                      color: '#999',
+                      marginBottom: '4px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {getDisplayUrl(note)}
+                  </div>
+                  {note.content && (
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        color: '#666',
+                        marginBottom: '4px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {note.content.substring(0, 80)}{note.content.length > 80 ? '...' : ''}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      {note.hasReminder && note.nextTrigger && note.nextTrigger <= Date.now() && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: '#ffebee',
+                            color: '#e53935',
+                          }}
+                        >
+                          Overdue
+                        </span>
+                      )}
+                      {note.hasReminder && note.scheduleType === 'recurring' && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: '#e3f2fd',
+                            color: '#1976d2',
+                          }}
+                        >
+                          Recurring
+                        </span>
+                      )}
+                      {category && (
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '10px',
+                            backgroundColor: category.color + '20',
+                            color: category.color,
+                          }}
+                        >
+                          {category.name}
+                        </span>
+                      )}
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: '#f5f5f5',
+                          color: '#666',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {note.urlMatchType}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={() => onEdit(note)}
+                        title="Edit note"
+                        className="icon-btn"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#4a90d9',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        ✏️
+                      </button>
+                      <button
+                        onClick={() => openNote(note.url)}
+                        title="Open page"
+                        className="icon-btn"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#4a90d9',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        🔗
+                      </button>
+                      <button
+                        onClick={() => onDelete(note.id)}
+                        title="Delete note"
+                        className="icon-btn"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#e53935',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          fontSize: '14px',
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
-            )}
-
-            {error && (
-              <div style={{ color: '#e53935', fontSize: '12px', marginTop: '4px' }}>
-                {error}
-              </div>
-            )}
-          </div>
-          <div style={{ marginBottom: '8px' }}>
-            <select
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '8px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-              }}
-            >
-              <option value="">⬜ No category</option>
-              {categories.map((cat) => (
-                <option key={cat.id} value={cat.id} style={{ color: cat.color }}>
-                  ● {cat.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button
-            onClick={handleAdd}
-            style={{
-              width: '100%',
-              padding: '10px',
-              backgroundColor: '#4a90d9',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-            }}
-          >
-            Add Reminder
-          </button>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
+interface ReminderFormState {
+  title: string;
+  timeInput: string;
+  categoryId: string;
+  matchUrl: string;
+}
+
+// Helper to format relative time with time of day
+function formatReminderTime(timestamp: number): { relative: string; iso: string } {
+  const now = Date.now();
+  const diff = timestamp - now;
+  const date = new Date(timestamp);
+  const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const isoStr = date.toISOString();
+
+  if (diff < 0) {
+    return { relative: 'Overdue', iso: isoStr };
+  }
+
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    return { relative: `${days}d at ${timeStr}`, iso: isoStr };
+  }
+  if (hours > 0) {
+    return { relative: `${hours}h at ${timeStr}`, iso: isoStr };
+  }
+  if (minutes > 0) {
+    return { relative: `${minutes}m`, iso: isoStr };
+  }
+  return { relative: 'Soon', iso: isoStr };
+}
+
+interface RemindersTabProps {
+  notes: PageNote[];
+  categories: Category[];
+  currentUrl: string;
+  onEdit: (note: PageNote) => void;
+  onDelete: (id: string) => void;
+}
+
+function RemindersTab({
+  notes,
+  categories,
+  currentUrl,
+  onEdit,
+  onDelete,
+}: RemindersTabProps) {
+  // Filter notes that have reminders and sort by next trigger
+  const notesWithReminders = notes
+    .filter((n) => n.hasReminder && n.nextTrigger)
+    .sort((a, b) => (a.nextTrigger || 0) - (b.nextTrigger || 0));
+
+  function openNote(url: string) {
+    browser.tabs.query({ url }).then((tabs) => {
+      if (tabs.length > 0 && tabs[0].id) {
+        browser.tabs.update(tabs[0].id, { active: true }).then(() => {
+          if (tabs[0].windowId) {
+            browser.windows.update(tabs[0].windowId, { focused: true });
+          }
+        });
+      } else {
+        browser.tabs.create({ url });
+      }
+    });
+  }
+
+  if (notesWithReminders.length === 0) {
+    return (
+      <div style={{ color: '#666', textAlign: 'center', padding: '40px 20px' }}>
+        <div style={{ fontSize: '32px', marginBottom: '12px' }}>⏰</div>
+        <div>No notes with reminders.</div>
+        <div style={{ fontSize: '12px', marginTop: '8px' }}>
+          Add reminders to notes in the "📄 This Page" tab.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px', flexShrink: 0 }}>
+        Notes with Reminders ({notesWithReminders.length})
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {notesWithReminders.map((note) => {
+          const category = categories.find((c) => c.id === note.categoryId);
+          const isOverdue = note.nextTrigger ? note.nextTrigger <= Date.now() : false;
+          const timeInfo = note.nextTrigger ? formatReminderTime(note.nextTrigger) : null;
+          const firstLine = note.content ? note.content.split('\n')[0] : '';
+          const truncatedContent = firstLine.length > 60 ? firstLine.substring(0, 60) + '…' : firstLine;
+
+          return (
+            <div
+              key={note.id}
+              className="hover-item"
+              title={`${note.title || 'Untitled'}\n\n${note.content}`}
+              style={{
+                padding: '8px',
+                marginBottom: '4px',
+                borderRadius: '4px',
+                display: 'flex',
+                gap: '8px',
+                alignItems: 'flex-start',
+                backgroundColor: category ? getLightColor(category.color, 0.15) : '#f5f5f5',
+                borderLeft: category ? `4px solid ${category.color}` : 'none',
+                paddingLeft: category ? '8px' : '12px',
+              }}
+            >
+              <div style={{ fontSize: '14px', marginTop: '2px' }}>🔔</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  title={note.title || 'Untitled'}
+                  onClick={() => openNote(note.url)}
+                  style={{
+                    fontWeight: 600,
+                    marginBottom: '4px',
+                    cursor: 'pointer',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {note.title || 'Untitled'}
+                </div>
+                <div
+                  title={getDisplayUrl(note)}
+                  style={{
+                    fontSize: '11px',
+                    color: '#999',
+                    marginBottom: '4px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {getDisplayUrl(note)}
+                </div>
+                {truncatedContent && (
+                  <div
+                    style={{
+                      fontSize: '11px',
+                      color: '#666',
+                      marginBottom: '4px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {truncatedContent}
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                    {isOverdue && (
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: '#ffebee',
+                          color: '#e53935',
+                        }}
+                      >
+                        Overdue
+                      </span>
+                    )}
+                    {note.scheduleType === 'recurring' && (
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: '#e3f2fd',
+                          color: '#1976d2',
+                        }}
+                      >
+                        Recurring
+                      </span>
+                    )}
+                    {category && (
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: category.color + '20',
+                          color: category.color,
+                        }}
+                      >
+                        {category.name}
+                      </span>
+                    )}
+                    {timeInfo && (
+                      <span
+                        title={timeInfo.iso}
+                        style={{ fontSize: '11px', color: isOverdue ? '#e53935' : '#666' }}
+                      >
+                        {timeInfo.relative}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <button
+                      onClick={() => onEdit(note)}
+                      title="Edit note"
+                      className="icon-btn"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#4a90d9',
+                        cursor: 'pointer',
+                        padding: '2px',
+                        fontSize: '14px',
+                      }}
+                    >
+                      ✏️
+                    </button>
+                    <button
+                      onClick={() => onDelete(note.id)}
+                      title="Delete note"
+                      className="icon-btn"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#e53935',
+                        cursor: 'pointer',
+                        padding: '2px',
+                        fontSize: '14px',
+                      }}
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
 interface TriggeredTabProps {
   triggeredReminders: TriggeredReminder[];
+  categories: Category[];
+  reminders: TimeReminder[];
   onNavigate: (triggered: TriggeredReminder) => void;
   onDismiss: (id: string) => void;
   onClearAll: () => void;
 }
 
-function TriggeredTab({ triggeredReminders, onNavigate, onDismiss, onClearAll }: TriggeredTabProps) {
+function TriggeredTab({ triggeredReminders, categories, reminders, onNavigate, onDismiss, onClearAll }: TriggeredTabProps) {
   function formatTriggeredAgo(timestamp: number): string {
     const diff = Date.now() - timestamp;
     const minutes = Math.floor(diff / 60000);
@@ -1828,54 +1849,97 @@ function TriggeredTab({ triggeredReminders, onNavigate, onDismiss, onClearAll }:
       </div>
 
       <div style={{ maxHeight: '300px', overflow: 'auto' }}>
-        {triggeredReminders.map((triggered) => (
-          <div
-            key={triggered.id}
-            className="hover-item"
-            style={{
-              padding: '10px',
-              borderBottom: '2px solid #ddd',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              cursor: 'pointer',
-            }}
-            onClick={() => onNavigate(triggered)}
-          >
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 500, marginBottom: '4px' }}>
-                {triggered.title || 'Reminder'}
-              </div>
-              <div style={{ fontSize: '11px', color: '#666', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {triggered.url}
-              </div>
-              <div style={{ fontSize: '10px', color: '#999', marginTop: '4px' }}>
-                📅 {formatDate(new Date(triggered.triggeredAt))}
-              </div>
-              <div style={{ fontSize: '10px', color: '#e53935', marginTop: '2px' }}>
-                ⏱️ Triggered {formatTriggeredAgo(triggered.triggeredAt)}
+        {triggeredReminders.map((triggered) => {
+          const reminder = reminders.find(r => r.id === triggered.reminderId);
+          const category = reminder ? categories.find((c) => c.id === reminder.categoryId) : undefined;
+          return (
+            <div
+              key={triggered.id}
+              className="hover-item"
+              style={{
+                padding: '8px',
+                marginBottom: '4px',
+                borderRadius: '4px',
+                display: 'flex',
+                gap: '8px',
+                alignItems: 'flex-start',
+                backgroundColor: '#ffebee',
+                borderLeft: category ? `4px solid ${category.color}` : '4px solid #e53935',
+                paddingLeft: '8px',
+                cursor: 'pointer',
+              }}
+              onClick={() => onNavigate(triggered)}
+            >
+              <div style={{ fontSize: '14px', marginTop: '2px' }}>🔔</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    marginBottom: '4px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {triggered.title || 'Reminder'}
+                </div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#999',
+                    marginBottom: '4px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {triggered.url}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                    {category && (
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          backgroundColor: category.color + '20',
+                          color: category.color,
+                        }}
+                      >
+                        {category.name}
+                      </span>
+                    )}
+                    <span style={{ fontSize: '11px', color: '#666' }}>
+                      📅 {formatDate(new Date(triggered.triggeredAt))}
+                    </span>
+                    <span style={{ fontSize: '11px', color: '#e53935' }}>
+                      ⏱️ {formatTriggeredAgo(triggered.triggeredAt)}
+                    </span>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDismiss(triggered.id);
+                    }}
+                    className="icon-btn"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#e53935',
+                      cursor: 'pointer',
+                      padding: '2px',
+                      fontSize: '14px',
+                    }}
+                    title="Dismiss"
+                  >
+                    ✖
+                  </button>
+                </div>
               </div>
             </div>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onDismiss(triggered.id);
-              }}
-              className="icon-btn"
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#666',
-                cursor: 'pointer',
-                padding: '4px 8px',
-                fontSize: '16px',
-              }}
-              title="Dismiss"
-            >
-              ×
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
