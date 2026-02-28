@@ -14,7 +14,7 @@ import {
 import { webdavService, WebDAVAuthError, WebDAVNetworkError } from './webdav';
 import { alarmService } from './alarms';
 
-const STORAGE_KEYS = {
+export const STORAGE_KEYS = {
   NOTES: 'notes',
   REMINDERS: 'reminders',
   CATEGORIES: 'categories',
@@ -22,15 +22,34 @@ const STORAGE_KEYS = {
   TRIGGERED_REMINDERS: 'triggeredReminders',
 } as const;
 
+const SYNCED_SETTING_KEYS = [
+  'syncEnabled',
+  'notifications',
+  'preselectLastCategory',
+  'popupHeight',
+  'editViewMode',
+  'webdavUrl',
+  'webdavEnabled',
+  'categoryColors',
+] as const;
+
+const LOCAL_SETTING_KEYS = [
+  'lastDeleteAllTimestamp',
+  'webdavUsername',
+  'webdavPassword',
+  'webdavBasePath',
+  'webdavSyncInterval',
+  'webdavLastSync',
+  'webdavSyncErrors',
+] as const;
+
 type StorageArea = 'local' | 'sync';
 
 class StorageService {
   private webdavSyncTimeouts: Map<string, NodeJS.Timeout> = new Map();
   private autoSyncInterval: NodeJS.Timeout | null = null;
 
-  constructor() {
-    this.migrateSettings();
-  }
+  constructor() {}
   
   // Migration: Move WebDAV credentials from sync storage to local storage
   private async migrateSettings(): Promise<void> {
@@ -68,6 +87,7 @@ class StorageService {
           notifications: oldSettings.notifications,
           preselectLastCategory: oldSettings.preselectLastCategory,
           popupHeight: oldSettings.popupHeight,
+          editViewMode: oldSettings.editViewMode,
           webdavUrl: oldSettings.webdavUrl,
           webdavEnabled: oldSettings.webdavEnabled
         };
@@ -95,21 +115,28 @@ class StorageService {
       }
 
       const categories = await this.getCategories();
-      const settings = await this.getSettings();
+      const syncedData = await browser.storage.sync.get(STORAGE_KEYS.SETTINGS);
+      const syncedSettings = (syncedData[STORAGE_KEYS.SETTINGS] || {}) as Partial<Settings>;
       
       // Extract colors from categories into synced settings
-      if (categories.length > 0) {
+      if (categories.length > 0 && Object.keys(syncedSettings).length > 0) {
         const categoryColors: { [key: string]: string } = {};
         categories.forEach(cat => {
           categoryColors[cat.id] = cat.color;
         });
-        
-        settings.categoryColors = categoryColors;
-        await this.saveSettings(settings);
+
+        await browser.storage.sync.set({
+          [STORAGE_KEYS.SETTINGS]: {
+            ...syncedSettings,
+            categoryColors,
+          },
+        });
         console.log('Migration complete: Category colors added to synced settings');
+
+        await browser.storage.local.set({ 'settings_migrated_v3': true });
+      } else if (syncedSettings.categoryColors) {
+        await browser.storage.local.set({ 'settings_migrated_v3': true });
       }
-      
-      await browser.storage.local.set({ 'settings_migrated_v3': true });
     } catch (error) {
       console.error('Error migrating category colors:', error);
     }
@@ -183,7 +210,8 @@ class StorageService {
       await storage.set({ [STORAGE_KEYS.CATEGORIES]: DEFAULT_CATEGORIES });
     }
     if (!data[STORAGE_KEYS.SETTINGS]) {
-      await storage.set({ [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS });
+      // Keep local settings minimal. Synced preferences come from browser.storage.sync.
+      await storage.set({ [STORAGE_KEYS.SETTINGS]: {} });
     }
     if (!data[STORAGE_KEYS.NOTES]) {
       await storage.set({ [STORAGE_KEYS.NOTES]: [] });
@@ -636,26 +664,57 @@ class StorageService {
     const syncedData = await browser.storage.sync.get(STORAGE_KEYS.SETTINGS);
     const localData = await browser.storage.local.get(STORAGE_KEYS.SETTINGS);
     
-    const syncedSettings = syncedData[STORAGE_KEYS.SETTINGS] || {};
-    const localSettings = localData[STORAGE_KEYS.SETTINGS] || {};
-    
-    // Merge: local settings override synced if both exist (for migration)
+    const syncedSettingsRaw = (syncedData[STORAGE_KEYS.SETTINGS] || {}) as Partial<Settings>;
+    const localSettingsRaw = (localData[STORAGE_KEYS.SETTINGS] || {}) as Partial<Settings>;
+
+    const syncedSettings: Partial<Settings> = {};
+    for (const key of SYNCED_SETTING_KEYS) {
+      const syncValue = syncedSettingsRaw[key];
+      if (syncValue !== undefined) {
+        (syncedSettings as any)[key] = syncValue;
+      } else {
+        // Backward-compat fallback: use legacy local values only if sync has no value.
+        const legacyLocalValue = localSettingsRaw[key as keyof Settings];
+        if (legacyLocalValue !== undefined) {
+          (syncedSettings as any)[key] = legacyLocalValue;
+        }
+      }
+    }
+
+    const localSettings: Partial<Settings> = {};
+    for (const key of LOCAL_SETTING_KEYS) {
+      const localValue = localSettingsRaw[key];
+      if (localValue !== undefined) {
+        (localSettings as any)[key] = localValue;
+      }
+    }
+
+    // Merge with explicit ownership boundaries:
+    // - synced preferences from sync storage (with legacy fallback)
+    // - local device secrets/state from local storage
     return {
       ...DEFAULT_SETTINGS,
       ...syncedSettings,
-      ...localSettings
+      ...localSettings,
     };
   }
 
   async saveSettings(settings: Settings): Promise<void> {
+    const requestedPopupHeight = Number(settings.popupHeight);
+    const normalizedPopupHeight = Number.isFinite(requestedPopupHeight)
+      ? Math.min(1200, Math.max(600, requestedPopupHeight))
+      : DEFAULT_SETTINGS.popupHeight;
+
     // Split settings into synced and local
     const syncedSettings: Partial<Settings> = {
       syncEnabled: settings.syncEnabled,
       notifications: settings.notifications,
       preselectLastCategory: settings.preselectLastCategory,
-      popupHeight: settings.popupHeight,
+      popupHeight: normalizedPopupHeight,
+      editViewMode: settings.editViewMode === 'modal' ? 'modal' : 'tab',
       webdavUrl: settings.webdavUrl,
-      webdavEnabled: settings.webdavEnabled
+      webdavEnabled: settings.webdavEnabled,
+      categoryColors: settings.categoryColors,
     };
     
     const localSettings: Partial<Settings> = {
@@ -1323,6 +1382,22 @@ class StorageService {
         console.log('Storage: Imported all', importedNotes.length, 'notes without conflicts');
       }
     }
+  }
+
+  async getCategoryFileFromServer(filename: string): Promise<CategoryFile | null> {
+    const settings = await this.getSettings();
+    if (!settings.webdavEnabled || !settings.webdavUrl || !settings.webdavUsername || !settings.webdavPassword) {
+      throw new Error('WebDAV not configured');
+    }
+
+    webdavService.initClient(
+      settings.webdavUrl,
+      settings.webdavUsername,
+      settings.webdavPassword,
+      settings.webdavBasePath || '/TabReminder/'
+    );
+
+    return webdavService.getFile(filename);
   }
 }
 

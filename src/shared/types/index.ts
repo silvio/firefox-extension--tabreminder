@@ -86,6 +86,7 @@ export interface SyncedSettings {
   notifications: NotificationSettings;
   preselectLastCategory: boolean;
   popupHeight: number;
+  editViewMode: 'tab' | 'modal';
   webdavUrl?: string; // URL syncs so same server on all devices
   webdavEnabled?: boolean; // Enabled state syncs
   categoryColors?: { [categoryId: string]: string }; // Category colors sync across devices
@@ -158,4 +159,5 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   preselectLastCategory: false,
   popupHeight: 600,
+  editViewMode: 'tab',
 };

@@ -76,7 +76,7 @@ describe('timeParser', () => {
 
   describe('formatRelativeTime', () => {
     it('should format future time in days', () => {
-      const futureTime = Date.now() + 2 * 24 * 60 * 60 * 1000;
+      const futureTime = Date.now() + (2 * 24 * 60 * 60 * 1000) + (60 * 60 * 1000);
       expect(formatRelativeTime(futureTime)).toBe('in 2d');
     });
 

@@ -18,6 +18,7 @@ DRY_RUN=false
 AUTO_YES=false
 EXCLUDE_PATTERNS=()
 CREATE_TAGS=true  # Create safety tags by default
+COMMIT_TEXT=""
 
 # Exclusion pattern source tracking
 declare -a CLI_PATTERNS=()
@@ -40,6 +41,8 @@ Options:
   -m, --main BRANCH       Target branch (default: main)
   -e, --exclude PATTERN   Exclude paths (repeatable)
   --no-tags               Skip creating safety backup tags
+  -t, --text              Additional text to commit message (prepended to "import from <source>")
+
 
 Examples:
   ./sync-main.sh dev                 # Sync dev → main
@@ -50,7 +53,7 @@ Examples:
 
 Exclusions:
   Use -e flag to exclude files/folders. Supports wildcards: *.md, docs/
-  
+
   Advanced config (git config, .sync-exclude file):
     ./sync-main.sh --help-full
 
@@ -66,7 +69,7 @@ EOF
 show_help_full() {
     # Show short help first
     show_help_short
-    
+
     cat << EOF
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -88,7 +91,7 @@ Three Configuration Methods (all merge together):
    [dev -> main]
    exclude = .github
    exclude = docs
-   
+
    [* -> main]
    exclude = .github
 
@@ -96,7 +99,7 @@ Pattern Merging:
   All matching patterns combine (additive). Example:
     sync.from-*.to-*.exclude = ".github"
     sync.from-dev.to-*.exclude = ".testfile"
-    
+
     ./sync-main.sh dev main
     → Excludes: .github, .testfile (both!)
 
@@ -112,10 +115,10 @@ Disable Inheritance:
 Setup Examples:
   # Global default
   git config sync.from-*.to-*.exclude ".github"
-  
+
   # Specific override
   git config sync.from-dev.to-main.exclude "docs,*.md"
-  
+
   # Hotfix includes everything
   git config sync.from-hotfix.to-main.exclude ""
 
@@ -124,13 +127,13 @@ View Config:
 
 Config File Format:
   INI-style with [SOURCE -> TARGET] sections:
-  
+
   [dev -> main]           # Exact match
   exclude = .github
-  
+
   [* -> main]             # Any source → main
   exclude = .github
-  
+
   [* -> *]                # Global default
   exclude = .github
 
@@ -177,6 +180,10 @@ while [[ $# -gt 0 ]]; do
             CREATE_TAGS=false
             shift
             ;;
+        -t|--text)
+            COMMIT_TEXT="$2"
+            shift 2
+        ;;
         -*)
             echo -e "${RED}Error: Unknown option $1${NC}"
             echo "Run './sync-main.sh --help' for usage information"
@@ -201,7 +208,7 @@ fi
 read_git_config_patterns() {
     local source="$1"
     local target="$2"
-    
+
     # Try patterns in specificity order (most to least specific)
     local config_keys=(
         "sync.from-${source}.to-${target}.exclude"    # Exact match
@@ -209,16 +216,16 @@ read_git_config_patterns() {
         "sync.from-${source}.to-*.exclude"            # Source → any target
         "sync.from-*.to-*.exclude"                    # Global default
     )
-    
+
     for key in "${config_keys[@]}"; do
         local value=$(git config --get "$key" 2>/dev/null)
-        
+
         # Check for explicit empty (disables inheritance)
         if [ "$value" = "" ] && git config --get "$key" >/dev/null 2>&1; then
             # Empty string set explicitly - stop here, no patterns
             return
         fi
-        
+
         if [ -n "$value" ]; then
             # Split comma-separated patterns
             IFS=',' read -ra patterns <<< "$value"
@@ -279,7 +286,7 @@ if git show-ref --verify --quiet "refs/heads/$SOURCE_REF"; then
 elif git show-ref --verify --quiet "refs/tags/$SOURCE_REF"; then
     echo -e "${BLUE}Source type:${NC} tag (immutable)"
 else
-    echo -e "${BLUE}Source type:${NC} commit/reference"
+    echo -e "${BLUE}Source type:${NC} commit/reference (immutable, detached)"
 fi
 echo ""
 
@@ -309,24 +316,26 @@ fi
 create_safety_tags() {
     local source_ref="$1"
     local target_branch="$2"
-    
+
     # Generate UTC timestamp for UUID
     SYNC_UUID=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    
+
     # Sanitize branch names for tag names (replace / with -)
     local source_clean=$(echo "$source_ref" | tr '/' '-')
     local target_clean=$(echo "$target_branch" | tr '/' '-')
-    
+
     # Create tag names
     SOURCE_TAG="sync-backup--${SYNC_UUID}--source--${source_clean}"
     TARGET_TAG="sync-backup--${SYNC_UUID}--target--${target_clean}"
-    
+
     if [ "$CREATE_TAGS" = false ]; then
+        echo -e "${DIM}Safety backup tags skipped (--no-tags)${NC}"
+        echo ""
         return 0
     fi
-    
+
     echo -e "${BLUE}Creating safety backup tags...${NC}"
-    
+
     # Tag source
     if [ "$DRY_RUN" = false ]; then
         if git tag "$SOURCE_TAG" "$source_ref" 2>/dev/null; then
@@ -337,7 +346,7 @@ create_safety_tags() {
     else
         echo -e "  ${BLUE}[DRY-RUN]${NC} Would tag source ($source_ref): $SOURCE_TAG"
     fi
-    
+
     # Tag target
     if [ "$DRY_RUN" = false ]; then
         if git tag "$TARGET_TAG" "$target_branch" 2>/dev/null; then
@@ -348,7 +357,7 @@ create_safety_tags() {
     else
         echo -e "  ${BLUE}[DRY-RUN]${NC} Would tag target ($target_branch): $TARGET_TAG"
     fi
-    
+
     echo ""
     echo -e "${DIM}To revert this sync later:${NC}"
     echo -e "  ${DIM}git checkout $source_ref && git reset --hard $SOURCE_TAG${NC}"
@@ -363,42 +372,42 @@ create_safety_tags "$SOURCE_REF" "$MAIN_BRANCH"
 check_merge_conflicts() {
     local source="$1"
     local target="$2"
-    
+
     # Only check if source is a branch (we'll merge back)
     if [ "$IS_BRANCH" != true ]; then
         return 0
     fi
-    
+
     # Find merge base
     local merge_base=$(git merge-base "$source" "$target" 2>/dev/null)
     if [ -z "$merge_base" ]; then
         # No common ancestor - this is okay, skip check
         return 0
     fi
-    
+
     # Test merge using merge-tree
     local merge_result=$(git merge-tree "$merge_base" "$target" "$source" 2>/dev/null)
-    
+
     # Check for conflict markers
     if echo "$merge_result" | grep -q "^+<<<<<<<\|^+>>>>>>>\|^+======="; then
         return 1
     fi
-    
+
     return 0
 }
 
 # Function: Check if target branch has uncommitted changes
 check_target_clean() {
     local target="$1"
-    
+
     # Save current branch
     local current=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
-    
+
     # Checkout target to check its state
     if [ "$current" != "$target" ]; then
         git checkout "$target" --quiet 2>/dev/null || return 1
     fi
-    
+
     # Check for staged changes
     if ! git diff --cached --quiet; then
         # Return to original branch
@@ -407,19 +416,19 @@ check_target_clean() {
         fi
         return 1
     fi
-    
+
     # Return to original branch
     if [ "$current" != "$target" ] && [ "$current" != "detached" ]; then
         git checkout "$current" --quiet 2>/dev/null || true
     fi
-    
+
     return 0
 }
 
 # Function: Run all pre-flight checks
 run_preflight_checks() {
     echo -e "${BLUE}Running pre-flight checks...${NC}"
-    
+
     # Check for merge conflicts
     if ! check_merge_conflicts "$SOURCE_REF" "$MAIN_BRANCH"; then
         echo -e "${RED}✗ Pre-flight check failed: Merge conflicts detected${NC}"
@@ -428,7 +437,7 @@ run_preflight_checks() {
         exit 1
     fi
     echo -e "  ${GREEN}✓${NC} No merge conflicts detected"
-    
+
     # Check target branch is clean
     if ! check_target_clean "$MAIN_BRANCH"; then
         echo -e "${RED}✗ Pre-flight check failed: Target branch has staged changes${NC}"
@@ -436,7 +445,7 @@ run_preflight_checks() {
         exit 1
     fi
     echo -e "  ${GREEN}✓${NC} Target branch is clean"
-    
+
     echo -e "  ${GREEN}✓${NC} All pre-flight checks passed"
     echo ""
 }
@@ -451,20 +460,20 @@ get_excluded_files() {
     local source_ref="$1"
     shift
     local patterns=("$@")
-    
+
     if [ ${#patterns[@]} -eq 0 ]; then
         echo ""
         return
     fi
-    
+
     # Get all files in source
     local all_files=$(git ls-tree -r --name-only "$source_ref" 2>/dev/null | sort)
-    
+
     if [ -z "$all_files" ]; then
         echo ""
         return
     fi
-    
+
     # Filter out files matching exclusion patterns
     local excluded=""
     for file in $all_files; do
@@ -478,12 +487,12 @@ get_excluded_files() {
                     ;;
             esac
         done
-        
+
         if [ "$should_exclude" = true ]; then
             excluded="${excluded}${file}"$'\n'
         fi
     done
-    
+
     echo -n "$excluded"
 }
 
@@ -494,14 +503,14 @@ show_exclusion_summary() {
         echo ""
         return
     fi
-    
+
     echo -e "${BLUE}Exclusion configuration:${NC}"
-    
+
     # Show CLI patterns
     if [ ${#CLI_PATTERNS[@]} -gt 0 ]; then
         echo -e "  ${YELLOW}CLI patterns:${NC}        ${CLI_PATTERNS[*]}"
     fi
-    
+
     # Show git config patterns (future)
     if [ ${#CONFIG_PATTERNS[@]} -gt 0 ]; then
         echo -e "  ${YELLOW}Git config:${NC}"
@@ -510,7 +519,7 @@ show_exclusion_summary() {
             echo -e "    $pattern ${DIM}($source)${NC}"
         done
     fi
-    
+
     # Show file patterns (future)
     if [ ${#FILE_PATTERNS[@]} -gt 0 ]; then
         echo -e "  ${YELLOW}.sync-exclude:${NC}"
@@ -519,12 +528,12 @@ show_exclusion_summary() {
             echo -e "    $pattern ${DIM}($source)${NC}"
         done
     fi
-    
+
     # Summary line
     echo -e "  ${GREEN}──────────────────────────────────────────────${NC}"
     echo -e "  ${GREEN}Total:${NC} ${#EXCLUDE_PATTERNS[@]} patterns    ${GREEN}Matches:${NC} $EXCLUDED_COUNT files"
     echo ""
-    
+
     # Show excluded files
     if [ $EXCLUDED_COUNT -gt 0 ]; then
         echo -e "${BLUE}Files NOT being copied ($EXCLUDED_COUNT):${NC}"
@@ -675,7 +684,11 @@ else
 fi
 
 # Step 5: Create import commit
-COMMIT_MSG="import from \"$SOURCE_REF\""
+if [ -z "${COMMIT_TEXT}" ]; then
+    COMMIT_MSG="import from \"$SOURCE_REF\""
+else
+    COMMIT_MSG="${COMMIT_TEXT} (import from \"$SOURCE_REF\")"
+fi
 echo -e "${GREEN}Step 5: Create commit: $COMMIT_MSG${NC}"
 if [ "$DRY_RUN" = false ]; then
     if git diff --cached --quiet; then

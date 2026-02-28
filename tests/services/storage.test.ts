@@ -115,7 +115,7 @@ describe('StorageService', () => {
   });
 
   describe('deleteNote', () => {
-    it('should remove note by id', async () => {
+    it('should soft-delete note by id', async () => {
       const note: PageNote = {
         id: '1',
         url: 'https://example.com',
@@ -134,9 +134,13 @@ describe('StorageService', () => {
 
       await storageService.deleteNote('1');
 
-      expect(browserMock.storage.local.set).toHaveBeenCalledWith({
-        notes: [],
-      });
+      const setCalls = browserMock.storage.local.set.mock.calls;
+      const notesWrite = setCalls.find((call: any[]) => call[0]?.notes);
+      expect(notesWrite).toBeDefined();
+      const deletedNote = notesWrite[0].notes[0];
+      expect(deletedNote.id).toBe('1');
+      expect(deletedNote.deleted).toBe(true);
+      expect(deletedNote.hasReminder).toBe(false);
     });
   });
 
@@ -244,9 +248,13 @@ describe('StorageService', () => {
       await storageService.saveCategory(newCategory);
 
       const setCalls = browserMock.storage.local.set.mock.calls;
-      const lastCall = setCalls[setCalls.length - 1][0];
-      expect(lastCall.categories).toContainEqual(newCategory);
-      expect(lastCall.categories.length).toBe(DEFAULT_CATEGORIES.length + 1);
+      const categoriesWrite = setCalls.find((call: any[]) => call[0]?.categories);
+      expect(categoriesWrite).toBeDefined();
+      expect(categoriesWrite[0].categories.length).toBe(DEFAULT_CATEGORIES.length + 1);
+      const created = categoriesWrite[0].categories.find((c: Category) => c.id === newCategory.id);
+      expect(created).toBeDefined();
+      expect(created.name).toBe(newCategory.name);
+      expect(created.color).toBe(newCategory.color);
     });
 
     it('should delete default category (no longer protected)', async () => {
@@ -284,8 +292,59 @@ describe('StorageService', () => {
 
       await storageService.saveSettings(newSettings);
 
+      expect(browserMock.storage.sync.set).toHaveBeenCalledWith({
+        settings: {
+          syncEnabled: newSettings.syncEnabled,
+          notifications: newSettings.notifications,
+          preselectLastCategory: newSettings.preselectLastCategory,
+          popupHeight: newSettings.popupHeight,
+          editViewMode: newSettings.editViewMode,
+          webdavUrl: newSettings.webdavUrl,
+          webdavEnabled: newSettings.webdavEnabled,
+          categoryColors: newSettings.categoryColors,
+        },
+      });
+
       expect(browserMock.storage.local.set).toHaveBeenCalledWith({
-        settings: newSettings,
+        settings: {
+          lastDeleteAllTimestamp: newSettings.lastDeleteAllTimestamp,
+          webdavUsername: newSettings.webdavUsername,
+          webdavPassword: newSettings.webdavPassword,
+          webdavBasePath: newSettings.webdavBasePath,
+          webdavSyncInterval: newSettings.webdavSyncInterval,
+          webdavLastSync: newSettings.webdavLastSync,
+          webdavSyncErrors: newSettings.webdavSyncErrors,
+        },
+      });
+    });
+
+    it('should clamp popup height to minimum 600 when saving settings', async () => {
+      const newSettings = {
+        ...DEFAULT_SETTINGS,
+        popupHeight: 500,
+      };
+
+      await storageService.saveSettings(newSettings);
+
+      expect(browserMock.storage.sync.set).toHaveBeenCalledWith({
+        settings: expect.objectContaining({
+          popupHeight: 600,
+        }),
+      });
+    });
+
+    it('should clamp popup height to maximum 1200 when saving settings', async () => {
+      const newSettings = {
+        ...DEFAULT_SETTINGS,
+        popupHeight: 1400,
+      };
+
+      await storageService.saveSettings(newSettings);
+
+      expect(browserMock.storage.sync.set).toHaveBeenCalledWith({
+        settings: expect.objectContaining({
+          popupHeight: 1200,
+        }),
       });
     });
   });

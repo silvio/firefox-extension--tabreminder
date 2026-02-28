@@ -12,7 +12,7 @@ import { createNote, createReminder, getUrlMatchPreview } from '../shared/utils/
 import { parseTimeInput, formatDate, formatRelativeTime, getNextOccurrences, calculateNextTrigger, describeRecurringPattern } from '../shared/utils/timeParser';
 import { usePopupState } from '../shared/hooks/usePopupState';
 
-type Tab = 'current' | 'notes' | 'reminders' | 'triggered';
+type Tab = 'current' | 'notes' | 'reminders' | 'triggered' | 'edit';
 
 // Helper function to get light background color from category color
 function getLightColor(color: string, opacity: number = 0.15): string {
@@ -46,6 +46,35 @@ function getNoteTooltip(note: PageNote): string {
   return `${note.title || 'Untitled'}\n\n${note.content}`;
 }
 
+function noteToReminder(note: PageNote): TimeReminder | null {
+  if (!note.hasReminder || note.nextTrigger === undefined) {
+    return null;
+  }
+
+  return {
+    id: note.id,
+    url: note.url,
+    title: note.title,
+    scheduleType: note.scheduleType || 'once',
+    scheduledTime: note.scheduledTime ?? null,
+    recurringPattern: note.recurringPattern ?? null,
+    nextTrigger: note.nextTrigger,
+    categoryId: note.categoryId,
+    createdAt: note.createdAt,
+  };
+}
+
+function getPageRemindersFromNotes(notes: PageNote[]): TimeReminder[] {
+  return notes
+    .map(noteToReminder)
+    .filter((reminder): reminder is TimeReminder => reminder !== null)
+    .sort((a, b) => a.nextTrigger - b.nextTrigger);
+}
+
+function areRecurringPatternsEqual(a?: RecurringPattern | null, b?: RecurringPattern | null): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
 function Popup() {
   const { state: popupState, updateState: updatePopupState, resetNoteForm, resetReminderForm } = usePopupState();
   const [activeTab, setActiveTab] = useState<Tab>(popupState.activeTab as Tab);
@@ -61,6 +90,7 @@ function Popup() {
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState<any>(null);
   const [editingNote, setEditingNote] = useState<PageNote | null>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
 
   useEffect(() => {
     updatePopupState({ activeTab });
@@ -69,6 +99,18 @@ function Popup() {
   useEffect(() => {
     updatePopupState({ filterCategory });
   }, [filterCategory]);
+
+  useEffect(() => {
+    if (activeTab === 'edit' && getEditViewMode() !== 'tab') {
+      setActiveTab('notes');
+    }
+  }, [activeTab, settings]);
+
+  useEffect(() => {
+    if (activeTab === 'edit' && !editingNote) {
+      setActiveTab('notes');
+    }
+  }, [activeTab, editingNote]);
 
   useEffect(() => {
     loadData();
@@ -98,18 +140,7 @@ function Popup() {
       if (url) {
         const matching = await storageService.getNotesForUrl(url);
         setMatchingNotes(matching);
-
-        // Find reminders for this page (exact URL match)
-        const pageRems = remindersData.filter((r) => {
-          try {
-            const rUrl = new URL(r.url);
-            const pUrl = new URL(url);
-            return rUrl.hostname === pUrl.hostname && rUrl.pathname === pUrl.pathname;
-          } catch {
-            return false;
-          }
-        });
-        setPageReminders(pageRems);
+        setPageReminders(getPageRemindersFromNotes(matching));
       }
       
       // Check for pending edit from overlay
@@ -118,10 +149,7 @@ function Popup() {
         // Find the note
         const noteToEdit = notesData.find((n) => n.id === pendingEditNoteId);
         if (noteToEdit) {
-          // Switch to "This Page" tab
-          setActiveTab('current');
-          // Set the note to edit
-          setEditingNote(noteToEdit);
+          openEditor(noteToEdit, settingsData.editViewMode === 'modal' ? 'modal' : 'tab');
         }
         // Clear the pending edit
         await browser.storage.local.remove('pendingEditNoteId');
@@ -133,12 +161,117 @@ function Popup() {
     }
   }
 
+  async function refreshReminderViews(): Promise<void> {
+    const [updatedNotes, updatedReminders, updatedTriggered] = await Promise.all([
+      storageService.getNotes(),
+      storageService.getReminders(),
+      storageService.getTriggeredReminders(),
+    ]);
+    setNotes(updatedNotes);
+    setReminders(updatedReminders);
+    setTriggeredReminders(updatedTriggered);
+
+    if (currentUrl) {
+      const updatedMatching = await storageService.getNotesForUrl(currentUrl);
+      setMatchingNotes(updatedMatching);
+      setPageReminders(getPageRemindersFromNotes(updatedMatching));
+    } else {
+      setMatchingNotes([]);
+      setPageReminders([]);
+    }
+  }
+
+  async function dismissTriggeredEntries(entries: TriggeredReminder[]): Promise<void> {
+    if (entries.length === 0) {
+      return;
+    }
+
+    const notesData = await storageService.getNotes();
+    const notesById = new Map(notesData.map((note) => [note.id, note]));
+    const noteIdsToClear = new Set<string>();
+
+    for (const entry of entries) {
+      const note = notesById.get(entry.reminderId);
+      if (note?.hasReminder && note.scheduleType !== 'recurring') {
+        noteIdsToClear.add(note.id);
+      }
+    }
+
+    for (const noteId of noteIdsToClear) {
+      const note = notesById.get(noteId);
+      if (!note) continue;
+
+      const updatedNote: PageNote = {
+        ...note,
+        hasReminder: false,
+        scheduleType: undefined,
+        scheduledTime: undefined,
+        recurringPattern: undefined,
+        nextTrigger: undefined,
+        updatedAt: Date.now(),
+      };
+      await storageService.saveNote(updatedNote);
+    }
+
+    if (entries.length === 1) {
+      await storageService.dismissTriggeredReminder(entries[0].id);
+    } else {
+      await storageService.clearAllTriggeredReminders();
+    }
+
+    await refreshReminderViews();
+    await alarmService.updateTriggeredBadge();
+  }
+
+  function getEditViewMode(fallback?: { editViewMode?: string }): 'tab' | 'modal' {
+    const mode = fallback?.editViewMode || settings?.editViewMode;
+    return mode === 'modal' ? 'modal' : 'tab';
+  }
+
+  function openEditor(note: PageNote, modeOverride?: 'tab' | 'modal'): void {
+    setEditingNote(note);
+    updatePopupState({
+      noteTitle: note.title,
+      noteContent: note.content,
+      noteUrlMatchType: note.urlMatchType,
+      noteCategoryId: note.categoryId || '',
+      noteMatchUrl: note.url,
+    });
+
+    const mode = modeOverride || getEditViewMode();
+    if (mode === 'modal') {
+      setShowEditModal(true);
+    } else {
+      setShowEditModal(false);
+      setActiveTab('edit');
+    }
+  }
+
+  function closeEditor(fallbackTab: Tab = 'notes'): void {
+    setEditingNote(null);
+    setShowEditModal(false);
+    if (activeTab === 'edit') {
+      setActiveTab(fallbackTab);
+    }
+  }
+
   if (loading) {
     return <div style={{ padding: '16px' }}>Loading...</div>;
   }
 
+  const configuredPopupHeight = Number(settings?.popupHeight);
+  const popupHeight = Math.max(
+    600,
+    Number.isFinite(configuredPopupHeight) ? configuredPopupHeight : 600
+  );
+  const editViewMode = getEditViewMode();
+  const isEditTabEnabled = Boolean(editingNote);
+  const visibleTabs: Tab[] = editViewMode === 'tab'
+    ? ['current', 'notes', 'reminders', 'edit', 'triggered']
+    : ['current', 'notes', 'reminders', 'triggered'];
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: `${settings?.popupHeight || 600}px` }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: `${popupHeight}px`, position: 'relative' }}>
       <header style={{ padding: '12px 16px', borderBottom: '2px solid #ddd', flexShrink: 0 }}>
         <h1 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>
           TabReminder
@@ -146,28 +279,37 @@ function Popup() {
       </header>
 
       <nav style={{ display: 'flex', borderBottom: '2px solid #ddd', flexShrink: 0 }}>
-        {(['current', 'notes', 'reminders', 'triggered'] as Tab[]).map((tab) => {
+        {visibleTabs.map((tab) => {
           const tabLabels: Record<Tab, string> = {
             current: '📄 This Page',
             notes: '📝 Notes',
             reminders: '⏰ Reminders',
             triggered: '🔔',
+            edit: '✏️ Edit',
           };
+          const isEditTab = tab === 'edit';
+          const isDisabled = isEditTab && !isEditTabEnabled;
+
           return (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => {
+                if (isDisabled) return;
+                setActiveTab(tab);
+              }}
+              disabled={isDisabled}
               style={{
                 flex: 1,
                 padding: '10px',
                 border: 'none',
                 background: activeTab === tab ? '#f0f0f0' : 'transparent',
-                cursor: 'pointer',
+                cursor: isDisabled ? 'not-allowed' : 'pointer',
                 fontWeight: activeTab === tab ? 600 : 400,
                 borderBottom:
                   activeTab === tab ? '2px solid #4a90d9' : '2px solid transparent',
                 position: 'relative',
                 fontSize: '12px',
+                opacity: isDisabled ? 0.55 : 1,
               }}
             >
               {tabLabels[tab]}
@@ -194,8 +336,116 @@ function Popup() {
         })}
       </nav>
 
-      <main style={{ flex: 1, overflow: 'hidden', padding: '16px', display: 'flex', flexDirection: 'column' }}>
+      <main style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column' }}>
         {activeTab === 'current' && settings && (
+          <CurrentPageTab
+            url={currentUrl}
+            pageTitle={currentPageTitle}
+            matchingNotes={matchingNotes}
+            pageReminders={pageReminders}
+            categories={categories}
+            preselectLastCategory={settings.preselectLastCategory}
+            editingNote={null}
+            savedState={{
+              title: popupState.noteTitle,
+              content: popupState.noteContent,
+              urlMatchType: popupState.noteUrlMatchType as UrlMatchType,
+              categoryId: popupState.noteCategoryId,
+              matchUrl: popupState.noteMatchUrl || currentUrl,
+            }}
+            onStateChange={(state) => updatePopupState({
+              noteTitle: state.title,
+              noteContent: state.content,
+              noteUrlMatchType: state.urlMatchType,
+              noteCategoryId: state.categoryId,
+              noteMatchUrl: state.matchUrl,
+            })}
+            onSave={async (note) => {
+              await storageService.saveNote(note);
+              // Trigger immediate sync (no debounce) so sync happens even if popup closes immediately
+              if (note.categoryId) {
+                await storageService.triggerWebDAVSyncImmediate(note.categoryId);
+              }
+              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+                storageService.getNotes(),
+                storageService.getNotesForUrl(currentUrl),
+                storageService.getReminders(),
+              ]);
+              setNotes(updatedNotes);
+              setMatchingNotes(updatedMatchingNotes);
+              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+              setReminders(updatedReminders);
+              browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
+              resetNoteForm();
+            }}
+            onDelete={async (id) => {
+              await storageService.deleteNote(id);
+              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+                storageService.getNotes(),
+                storageService.getNotesForUrl(currentUrl),
+                storageService.getReminders(),
+              ]);
+              setNotes(updatedNotes);
+              setMatchingNotes(updatedMatchingNotes);
+              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+              setReminders(updatedReminders);
+              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
+              resetNoteForm();
+            }}
+            onEditNote={(note) => {
+              openEditor(note);
+            }}
+            onCancelEdit={() => closeEditor('current')}
+            onDeleteReminder={async (id) => {
+              await storageService.deleteReminder(id);
+              const [updatedReminders, updatedMatchingNotes] = await Promise.all([
+                storageService.getReminders(),
+                storageService.getNotesForUrl(currentUrl),
+              ]);
+              setReminders(updatedReminders);
+              setMatchingNotes(updatedMatchingNotes);
+              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+              browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+            }}
+          />
+        )}
+
+        {activeTab === 'notes' && (
+          <NotesListTab
+            notes={notes}
+            categories={categories}
+            filterCategory={filterCategory}
+            currentUrl={currentUrl}
+            onFilterChange={setFilterCategory}
+            onDelete={async (id) => {
+              await storageService.deleteNote(id);
+              setNotes(await storageService.getNotes());
+              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
+            }}
+            onEdit={(note) => {
+              openEditor(note);
+            }}
+          />
+        )}
+
+        {activeTab === 'reminders' && (
+          <RemindersTab
+            notes={notes}
+            categories={categories}
+            currentUrl={currentUrl}
+            onEdit={(note) => {
+              openEditor(note);
+            }}
+            onDelete={async (id) => {
+              await storageService.deleteNote(id);
+              setNotes(await storageService.getNotes());
+              setMatchingNotes(await storageService.getNotesForUrl(currentUrl));
+              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
+            }}
+          />
+        )}
+
+        {activeTab === 'edit' && settings && editViewMode === 'tab' && (
           <CurrentPageTab
             url={currentUrl}
             pageTitle={currentPageTitle}
@@ -220,99 +470,51 @@ function Popup() {
             })}
             onSave={async (note) => {
               await storageService.saveNote(note);
-              // Trigger immediate sync (no debounce) so sync happens even if popup closes immediately
               if (note.categoryId) {
                 await storageService.triggerWebDAVSyncImmediate(note.categoryId);
               }
-              setNotes(await storageService.getNotes());
-              setMatchingNotes(await storageService.getNotesForUrl(currentUrl));
+              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+                storageService.getNotes(),
+                storageService.getNotesForUrl(currentUrl),
+                storageService.getReminders(),
+              ]);
+              setNotes(updatedNotes);
+              setMatchingNotes(updatedMatchingNotes);
+              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+              setReminders(updatedReminders);
               browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
               resetNoteForm();
             }}
             onDelete={async (id) => {
               await storageService.deleteNote(id);
-              setNotes(await storageService.getNotes());
-              setMatchingNotes(await storageService.getNotesForUrl(currentUrl));
+              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+                storageService.getNotes(),
+                storageService.getNotesForUrl(currentUrl),
+                storageService.getReminders(),
+              ]);
+              setNotes(updatedNotes);
+              setMatchingNotes(updatedMatchingNotes);
+              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+              setReminders(updatedReminders);
               browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
               resetNoteForm();
+              closeEditor('notes');
             }}
-            onEditNote={(note) => {
-              setEditingNote(note);
-              updatePopupState({
-                noteTitle: note.title,
-                noteContent: note.content,
-                noteUrlMatchType: note.urlMatchType,
-                noteCategoryId: note.categoryId || '',
-                noteMatchUrl: note.url,
-              });
-            }}
-            onCancelEdit={() => setEditingNote(null)}
+            onEditNote={(note) => openEditor(note)}
+            onCancelEdit={() => closeEditor('notes')}
             onDeleteReminder={async (id) => {
               await storageService.deleteReminder(id);
-              setReminders(await storageService.getReminders());
-              const pageRems = reminders.filter((r) => {
-                try {
-                  const rUrl = new URL(r.url);
-                  const pUrl = new URL(currentUrl);
-                  return rUrl.hostname === pUrl.hostname && rUrl.pathname === pUrl.pathname && r.id !== id;
-                } catch {
-                  return false;
-                }
-              });
-              setPageReminders(pageRems);
+              const [updatedReminders, updatedMatchingNotes] = await Promise.all([
+                storageService.getReminders(),
+                storageService.getNotesForUrl(currentUrl),
+              ]);
+              setReminders(updatedReminders);
+              setMatchingNotes(updatedMatchingNotes);
+              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
               browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
             }}
-          />
-        )}
-
-        {activeTab === 'notes' && (
-          <NotesListTab
-            notes={notes}
-            categories={categories}
-            filterCategory={filterCategory}
-            currentUrl={currentUrl}
-            onFilterChange={setFilterCategory}
-            onDelete={async (id) => {
-              await storageService.deleteNote(id);
-              setNotes(await storageService.getNotes());
-              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
-            }}
-            onEdit={(note) => {
-              setEditingNote(note);
-              setActiveTab('current');
-              updatePopupState({
-                noteTitle: note.title,
-                noteContent: note.content,
-                noteUrlMatchType: note.urlMatchType,
-                noteCategoryId: note.categoryId || '',
-                noteMatchUrl: note.url,
-              });
-            }}
-          />
-        )}
-
-        {activeTab === 'reminders' && (
-          <RemindersTab
-            notes={notes}
-            categories={categories}
-            currentUrl={currentUrl}
-            onEdit={(note) => {
-              setEditingNote(note);
-              setActiveTab('current');
-              updatePopupState({
-                noteTitle: note.title,
-                noteContent: note.content,
-                noteUrlMatchType: note.urlMatchType,
-                noteCategoryId: note.categoryId || '',
-                noteMatchUrl: note.url,
-              });
-            }}
-            onDelete={async (id) => {
-              await storageService.deleteNote(id);
-              setNotes(await storageService.getNotes());
-              setMatchingNotes(await storageService.getNotesForUrl(currentUrl));
-              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
-            }}
+            editorOnly
+            requireEditingNote
           />
         )}
 
@@ -332,24 +534,112 @@ function Popup() {
               } else {
                 await browser.tabs.create({ url: triggered.url });
               }
-              // Dismiss and update badge
-              await storageService.dismissTriggeredReminder(triggered.id);
-              setTriggeredReminders(await storageService.getTriggeredReminders());
-              await alarmService.updateTriggeredBadge();
+              await dismissTriggeredEntries([triggered]);
             }}
-            onDismiss={async (id) => {
-              await storageService.dismissTriggeredReminder(id);
-              setTriggeredReminders(await storageService.getTriggeredReminders());
-              await alarmService.updateTriggeredBadge();
+            onDismiss={async (triggered) => {
+              await dismissTriggeredEntries([triggered]);
             }}
             onClearAll={async () => {
-              await storageService.clearAllTriggeredReminders();
-              setTriggeredReminders([]);
-              await alarmService.updateTriggeredBadge();
+              await dismissTriggeredEntries(triggeredReminders);
             }}
           />
         )}
       </main>
+
+      {showEditModal && settings && (
+        <div
+          onClick={() => closeEditor(activeTab)}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundColor: 'rgba(0,0,0,0.35)',
+            zIndex: 20,
+            padding: '10px',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              backgroundColor: '#fff',
+              borderRadius: '8px',
+              height: '100%',
+              overflow: 'auto',
+              padding: '12px',
+            }}
+          >
+            <CurrentPageTab
+              url={currentUrl}
+              pageTitle={currentPageTitle}
+              matchingNotes={matchingNotes}
+              pageReminders={pageReminders}
+              categories={categories}
+              preselectLastCategory={settings.preselectLastCategory}
+              editingNote={editingNote}
+              savedState={{
+                title: popupState.noteTitle,
+                content: popupState.noteContent,
+                urlMatchType: popupState.noteUrlMatchType as UrlMatchType,
+                categoryId: popupState.noteCategoryId,
+                matchUrl: popupState.noteMatchUrl || currentUrl,
+              }}
+              onStateChange={(state) => updatePopupState({
+                noteTitle: state.title,
+                noteContent: state.content,
+                noteUrlMatchType: state.urlMatchType,
+                noteCategoryId: state.categoryId,
+                noteMatchUrl: state.matchUrl,
+              })}
+              onSave={async (note) => {
+                await storageService.saveNote(note);
+                if (note.categoryId) {
+                  await storageService.triggerWebDAVSyncImmediate(note.categoryId);
+                }
+                const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+                  storageService.getNotes(),
+                  storageService.getNotesForUrl(currentUrl),
+                  storageService.getReminders(),
+                ]);
+                setNotes(updatedNotes);
+                setMatchingNotes(updatedMatchingNotes);
+                setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+                setReminders(updatedReminders);
+                browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
+                resetNoteForm();
+              }}
+              onDelete={async (id) => {
+                await storageService.deleteNote(id);
+                const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+                  storageService.getNotes(),
+                  storageService.getNotesForUrl(currentUrl),
+                  storageService.getReminders(),
+                ]);
+                setNotes(updatedNotes);
+                setMatchingNotes(updatedMatchingNotes);
+                setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+                setReminders(updatedReminders);
+                browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
+                resetNoteForm();
+                closeEditor(activeTab);
+              }}
+              onEditNote={(note) => openEditor(note, 'modal')}
+              onCancelEdit={() => closeEditor(activeTab)}
+              onDeleteReminder={async (id) => {
+                await storageService.deleteReminder(id);
+                const [updatedReminders, updatedMatchingNotes] = await Promise.all([
+                  storageService.getReminders(),
+                  storageService.getNotesForUrl(currentUrl),
+                ]);
+                setReminders(updatedReminders);
+                setMatchingNotes(updatedMatchingNotes);
+                setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+                browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+              }}
+              editorOnly
+              requireEditingNote
+            />
+          </div>
+        </div>
+      )}
 
       <footer style={{
         padding: '8px 16px',
@@ -408,6 +698,8 @@ interface CurrentPageTabProps {
   onEditNote: (note: PageNote) => void;
   onCancelEdit: () => void;
   onDeleteReminder: (id: string) => void;
+  editorOnly?: boolean;
+  requireEditingNote?: boolean;
 }
 
 function CurrentPageTab({
@@ -425,6 +717,8 @@ function CurrentPageTab({
   onEditNote,
   onCancelEdit,
   onDeleteReminder,
+  editorOnly = false,
+  requireEditingNote = false,
 }: CurrentPageTabProps) {
   const [title, setTitle] = useState(savedState.title || pageTitle);
   const [content, setContent] = useState(savedState.content);
@@ -518,7 +812,15 @@ function CurrentPageTab({
     onStateChange({ title, content, urlMatchType, categoryId, matchUrl });
   }, [title, content, urlMatchType, categoryId, matchUrl]);
 
-  if (!url || url.startsWith('about:') || url.startsWith('moz-extension:')) {
+  if (requireEditingNote && !editingNote) {
+    return (
+      <div style={{ color: '#666', textAlign: 'center', paddingTop: '24px' }}>
+        Select a note first to start editing.
+      </div>
+    );
+  }
+
+  if (!editingNote && (!url || url.startsWith('about:') || url.startsWith('moz-extension:'))) {
     return (
       <div style={{ color: '#666', textAlign: 'center' }}>
         Cannot add notes to this page.
@@ -567,23 +869,63 @@ function CurrentPageTab({
         }
       : createNote(matchUrl, title, content, urlMatchType, categoryId || null);
     
-    // Add reminder fields if reminder is enabled
-    let finalScheduledTime = scheduledTime;
-    let finalRecurringPattern = recurringPattern;
-    
-    if (hasReminder && scheduleType === 'recurring') {
-      // Build recurring pattern from state
-      finalRecurringPattern = buildRecurringPattern();
-      finalScheduledTime = calculateNextTrigger(finalRecurringPattern);
+    const finalRecurringPattern = hasReminder && scheduleType === 'recurring'
+      ? buildRecurringPattern()
+      : null;
+    const existingHasReminder = Boolean(editingNote?.hasReminder);
+    const reminderUnchanged =
+      Boolean(editingNote) &&
+      existingHasReminder === hasReminder &&
+      (!hasReminder || (
+        (editingNote?.scheduleType || 'once') === scheduleType &&
+        (
+          scheduleType === 'once'
+            ? (editingNote?.scheduledTime ?? null) === (scheduledTime ?? null)
+            : areRecurringPatternsEqual(editingNote?.recurringPattern ?? null, finalRecurringPattern)
+        )
+      ));
+
+    let reminderFields: Pick<PageNote, 'hasReminder' | 'scheduleType' | 'scheduledTime' | 'recurringPattern' | 'nextTrigger'>;
+    if (editingNote && reminderUnchanged) {
+      // Preserve existing reminder timing when only note fields changed.
+      reminderFields = {
+        hasReminder: editingNote.hasReminder,
+        scheduleType: editingNote.scheduleType,
+        scheduledTime: editingNote.scheduledTime,
+        recurringPattern: editingNote.recurringPattern,
+        nextTrigger: editingNote.nextTrigger,
+      };
+    } else if (!hasReminder) {
+      reminderFields = {
+        hasReminder: false,
+        scheduleType: undefined,
+        scheduledTime: undefined,
+        recurringPattern: undefined,
+        nextTrigger: undefined,
+      };
+    } else if (scheduleType === 'recurring' && finalRecurringPattern) {
+      const nextTrigger = calculateNextTrigger(finalRecurringPattern);
+      reminderFields = {
+        hasReminder: true,
+        scheduleType: 'recurring',
+        scheduledTime: nextTrigger,
+        recurringPattern: finalRecurringPattern,
+        nextTrigger,
+      };
+    } else {
+      const nextTrigger = scheduledTime ?? undefined;
+      reminderFields = {
+        hasReminder: true,
+        scheduleType: 'once',
+        scheduledTime: scheduledTime ?? undefined,
+        recurringPattern: null,
+        nextTrigger,
+      };
     }
-    
+
     const updatedNote: PageNote = {
       ...baseNote,
-      hasReminder,
-      scheduleType: hasReminder ? scheduleType : undefined,
-      scheduledTime: hasReminder ? finalScheduledTime : undefined,
-      recurringPattern: hasReminder ? finalRecurringPattern : undefined,
-      nextTrigger: hasReminder && finalScheduledTime ? finalScheduledTime : undefined,
+      ...reminderFields,
     };
     
     onSave(updatedNote);
@@ -608,11 +950,10 @@ function CurrentPageTab({
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Notes list - takes available space */}
-      <div style={{ flex: 1, overflow: 'auto', marginBottom: '16px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%', overflowY: 'auto' }}>
+      <div style={{ marginBottom: editorOnly ? 0 : '16px' }}>
         {/* Existing notes for this page */}
-        {matchingNotes.length > 0 && (
+        {!editorOnly && matchingNotes.length > 0 && (
           <div style={{ marginBottom: '16px', paddingBottom: '12px', borderBottom: '2px solid #ddd' }}>
             <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
               📝 Notes for this page ({matchingNotes.length})
@@ -746,7 +1087,7 @@ function CurrentPageTab({
       )}
 
       {/* Reminders for this page */}
-      {pageReminders.length > 0 && (
+      {!editorOnly && pageReminders.length > 0 && (
         <div style={{ marginBottom: '16px', paddingBottom: '12px', borderBottom: '2px solid #ddd' }}>
           <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
             ⏰ Reminders for this page ({pageReminders.length})
@@ -754,6 +1095,7 @@ function CurrentPageTab({
           {pageReminders.map((reminder) => {
             const category = categories.find((c) => c.id === reminder.categoryId);
             const isOverdue = reminder.nextTrigger <= Date.now();
+            const timeInfo = formatReminderTime(reminder.nextTrigger);
             return (
               <div
                 key={reminder.id}
@@ -853,8 +1195,11 @@ function CurrentPageTab({
                           {category.name}
                         </span>
                       )}
-                      <span style={{ fontSize: '11px', color: isOverdue ? '#e53935' : '#666' }}>
-                        {formatRelativeTime(reminder.nextTrigger)}
+                      <span
+                        title={timeInfo.iso}
+                        style={{ fontSize: '11px', color: isOverdue ? '#e53935' : '#666' }}
+                      >
+                        {timeInfo.relative}
                       </span>
                     </div>
                     <div style={{ display: 'flex', gap: '4px' }}>
@@ -876,8 +1221,7 @@ function CurrentPageTab({
       )}
       </div>
 
-      {/* Note form - sticky at bottom */}
-      <div style={{ flexShrink: 0, borderTop: '2px solid #ddd', paddingTop: '12px' }}>
+      <div style={{ borderTop: editorOnly ? 'none' : '2px solid #ddd', paddingTop: editorOnly ? 0 : '12px' }}>
         <div style={{ fontSize: '12px', fontWeight: 600, color: '#666', marginBottom: '8px' }}>
           {editingNote ? '✏️ Edit Note' : '➕ Add New Note'}
           {editingNote && (
@@ -1255,7 +1599,7 @@ function CurrentPageTab({
       <div style={{ display: 'flex', gap: '8px' }}>
         <button
           onClick={handleSave}
-          disabled={!content.trim()}
+          disabled={!content.trim() && !hasReminder}
           style={{
             flex: 1,
             padding: '10px',
@@ -1263,8 +1607,8 @@ function CurrentPageTab({
             color: '#fff',
             border: 'none',
             borderRadius: '4px',
-            cursor: content.trim() ? 'pointer' : 'not-allowed',
-            opacity: content.trim() ? 1 : 0.5,
+            cursor: content.trim() || hasReminder ? 'pointer' : 'not-allowed',
+            opacity: content.trim() || hasReminder ? 1 : 0.5,
           }}
         >
           {editingNote ? 'Update Note' : 'Save Note'}
@@ -1568,6 +1912,18 @@ function formatReminderTime(timestamp: number): { relative: string; iso: string 
   const minutes = Math.floor(diff / 60000);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
+  const longDateThresholdDays = 30;
+
+  if (days > longDateThresholdDays) {
+    const absolute = date.toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    return { relative: absolute, iso: isoStr };
+  }
 
   if (days > 0) {
     return { relative: `${days}d at ${timeStr}`, iso: isoStr };
@@ -1799,7 +2155,7 @@ interface TriggeredTabProps {
   categories: Category[];
   reminders: TimeReminder[];
   onNavigate: (triggered: TriggeredReminder) => void;
-  onDismiss: (id: string) => void;
+  onDismiss: (triggered: TriggeredReminder) => void;
   onClearAll: () => void;
 }
 
@@ -1920,7 +2276,7 @@ function TriggeredTab({ triggeredReminders, categories, reminders, onNavigate, o
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      onDismiss(triggered.id);
+                      onDismiss(triggered);
                     }}
                     className="icon-btn"
                     style={{

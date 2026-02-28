@@ -54,6 +54,7 @@ const browserMock = {
   },
   runtime: {
     sendMessage: jest.fn(),
+    getURL: jest.fn((path: string) => path),
     onMessage: {
       addListener: jest.fn(),
       removeListener: jest.fn(),
@@ -72,3 +73,15 @@ const browserMock = {
 
 // Mock webextension-polyfill
 jest.mock('webextension-polyfill', () => browserMock);
+
+// Mock webdav client package (ESM in node_modules)
+jest.mock('webdav', () => ({
+  createClient: jest.fn(() => ({
+    getDirectoryContents: jest.fn().mockResolvedValue([]),
+    exists: jest.fn().mockResolvedValue(false),
+    createDirectory: jest.fn().mockResolvedValue(undefined),
+    getFileContents: jest.fn().mockResolvedValue(''),
+    putFileContents: jest.fn().mockResolvedValue(undefined),
+    deleteFile: jest.fn().mockResolvedValue(undefined),
+  })),
+}));

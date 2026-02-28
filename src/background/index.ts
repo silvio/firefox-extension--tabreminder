@@ -1,6 +1,6 @@
 // Background script - handles alarms, notifications, and tab events
 import browser from 'webextension-polyfill';
-import { storageService } from '../shared/services/storage';
+import { storageService, STORAGE_KEYS } from '../shared/services/storage';
 import { alarmService } from '../shared/services/alarms';
 import { hasAlarmSupport, hasBackgroundSync, hasNotificationSupport, isAndroid } from '../shared/utils/platform';
 
@@ -17,9 +17,9 @@ if (hasBackgroundSync()) {
     if (areaName !== 'local') return;
     
     // When notes change, trigger sync for affected categories
-    if (changes['tabreminder:notes']) {
-      const newNotes = changes['tabreminder:notes'].newValue as Array<{ categoryId: string | null }> | undefined;
-      const oldNotes = changes['tabreminder:notes'].oldValue as Array<{ categoryId: string | null }> | undefined;
+    if (changes[STORAGE_KEYS.NOTES]) {
+      const newNotes = changes[STORAGE_KEYS.NOTES].newValue as Array<{ categoryId: string | null }> | undefined;
+      const oldNotes = changes[STORAGE_KEYS.NOTES].oldValue as Array<{ categoryId: string | null }> | undefined;
       
       if (newNotes) {
         // Collect all unique category IDs from changed notes
@@ -46,8 +46,8 @@ if (hasBackgroundSync()) {
     }
     
     // When categories change, trigger sync for modified categories
-    if (changes['tabreminder:categories']) {
-      const newCategories = changes['tabreminder:categories'].newValue as Array<{ id: string }> | undefined;
+    if (changes[STORAGE_KEYS.CATEGORIES]) {
+      const newCategories = changes[STORAGE_KEYS.CATEGORIES].newValue as Array<{ id: string }> | undefined;
       if (newCategories) {
         console.log('Background: Detected category changes, triggering WebDAV sync for all categories');
         newCategories.forEach(category => {
@@ -69,12 +69,16 @@ browser.runtime.onInstalled.addListener(async () => {
   }
 });
 
-// Reschedule alarms on browser startup (desktop only)
-if (hasAlarmSupport()) {
-  browser.runtime.onStartup?.addListener(async () => {
+// Initialize extension services on browser startup
+browser.runtime.onStartup?.addListener(async () => {
+  await storageService.initialize();
+  if (hasAlarmSupport()) {
     await alarmService.rescheduleAllReminders();
-  });
+  }
+});
 
+// Reschedule alarms on supported platforms
+if (hasAlarmSupport()) {
   // Handle alarms
   browser.alarms.onAlarm.addListener(async (alarm) => {
     await alarmService.handleAlarm(alarm.name);
@@ -120,20 +124,11 @@ browser.tabs.onRemoved.addListener((tabId) => {
 async function checkForNote(tabId: number, url: string): Promise<void> {
   try {
     const notes = await storageService.getNotesForUrl(url);
-    const reminders = await storageService.getReminders();
     const categories = await storageService.getCategories();
     const triggeredReminders = await storageService.getTriggeredReminders();
 
     // Check if page has reminders
-    const hasReminders = reminders.some((r) => {
-      try {
-        const rUrl = new URL(r.url);
-        const pUrl = new URL(url);
-        return rUrl.hostname === pUrl.hostname && rUrl.pathname === pUrl.pathname;
-      } catch {
-        return false;
-      }
-    });
+    const hasReminders = notes.some((n) => n.hasReminder && n.nextTrigger !== undefined);
 
     // Update badge based on priority: triggered reminders > notes, or show both
     if (triggeredReminders.length > 0 && notes.length > 0) {
@@ -171,23 +166,50 @@ async function checkForNote(tabId: number, url: string): Promise<void> {
       
       const settings = await storageService.getSettings();
       if (shouldShowOverlay && settings.notifications.overlay) {
-        try {
-          await browser.tabs.sendMessage(tabId, {
+        const delivered = await sendOverlayMessageWithRetry(tabId, {
             type: 'SHOW_NOTES',
             notes,
             categories,
             overlayStyle: settings.notifications.overlayStyle,
             hasReminders,
           });
+        if (delivered) {
           shownOverlays.set(tabId, url);
-        } catch {
-          // Content script not ready yet, ignore
         }
       }
     }
   } catch (error) {
     console.error('Error checking for note:', error);
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendOverlayMessageWithRetry(
+  tabId: number,
+  payload: {
+    type: 'SHOW_NOTES';
+    notes: unknown[];
+    categories: unknown[];
+    overlayStyle: unknown;
+    hasReminders: boolean;
+  },
+  maxRetries: number = 2
+): Promise<boolean> {
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      await browser.tabs.sendMessage(tabId, payload);
+      return true;
+    } catch {
+      if (attempt === maxRetries) {
+        return false;
+      }
+      await delay(150 * (attempt + 1));
+    }
+  }
+  return false;
 }
 
 // Handle messages from popup/sidebar/content
@@ -199,6 +221,12 @@ browser.runtime.onMessage.addListener(async (message: unknown) => {
         checkForNote(tabs[0].id, tabs[0].url);
       }
     });
+  }
+  if (msg.type === 'TRIGGERED_REMINDER_ADDED') {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id && tabs[0].url) {
+      await checkForNote(tabs[0].id, tabs[0].url);
+    }
   }
   if (msg.type === 'REMINDER_CREATED' || msg.type === 'REMINDER_UPDATED') {
     alarmService.rescheduleAllReminders();
@@ -248,8 +276,9 @@ if (isAndroid()) {
     // Pass the tab URL and title as parameters so mobile page knows what page to save
     const url = encodeURIComponent(tab.url || '');
     const title = encodeURIComponent(tab.title || '');
+    const sourceTabId = typeof tab.id === 'number' ? `&sourceTabId=${tab.id}` : '';
     await browser.tabs.create({ 
-      url: browser.runtime.getURL(`mobile/index.html?url=${url}&title=${title}`)
+      url: browser.runtime.getURL(`mobile/index.html?url=${url}&title=${title}${sourceTabId}`)
     });
   });
 } else {

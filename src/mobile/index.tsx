@@ -4,9 +4,13 @@ import { createRoot } from 'react-dom/client';
 import browser from 'webextension-polyfill';
 import { storageService } from '../shared/services/storage';
 import { Category, PageNote, ScheduleType, FrequencyType, RecurringPattern, EndCondition } from '../shared/types';
-import { describeRecurringPattern, formatRelativeTime } from '../shared/utils/timeParser';
+import { describeRecurringPattern, formatRelativeTime, calculateNextTrigger } from '../shared/utils/timeParser';
 
-type Tab = 'current' | 'all';
+type Tab = 'current' | 'all' | 'edit';
+
+function areRecurringPatternsEqual(a?: RecurringPattern | null, b?: RecurringPattern | null): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
 
 function MobileApp() {
   const [currentUrl, setCurrentUrl] = useState('');
@@ -22,6 +26,8 @@ function MobileApp() {
   const [showModal, setShowModal] = useState<{ title: string; content: string } | null>(null);
   const [toast, setToast] = useState<string>('');
   const [syncing, setSyncing] = useState(false);
+  const [editViewMode, setEditViewMode] = useState<'tab' | 'modal'>('tab');
+  const [returnTab, setReturnTab] = useState<Tab>('current');
 
   // Note form state
   const [noteTitle, setNoteTitle] = useState('');
@@ -82,34 +88,42 @@ function MobileApp() {
       const params = new URLSearchParams(window.location.search);
       const urlParam = params.get('url');
       const titleParam = params.get('title');
+      let resolvedUrl = '';
       
       if (urlParam) {
         // URL passed as parameter (normal case when opened from browser action)
-        setCurrentUrl(decodeURIComponent(urlParam));
+        resolvedUrl = decodeURIComponent(urlParam);
+        setCurrentUrl(resolvedUrl);
         setCurrentTitle(decodeURIComponent(titleParam || ''));
       } else {
         // Fallback: query active tab (for direct navigation to mobile page)
         const tabs = await browser.tabs.query({ active: true, currentWindow: true });
         const currentTab = tabs[0];
         if (currentTab?.url && !currentTab.url.startsWith('moz-extension://')) {
-          setCurrentUrl(currentTab.url);
+          resolvedUrl = currentTab.url;
+          setCurrentUrl(resolvedUrl);
           setCurrentTitle(currentTab.title || '');
         }
       }
 
-      // Load categories and notes
-      const [cats, allNotes] = await Promise.all([
+      // Load categories, notes and synced view settings
+      const [cats, allNotes, settingsData] = await Promise.all([
         storageService.getCategories(),
-        storageService.getNotes()
+        storageService.getNotes(),
+        storageService.getSettings(),
       ]);
       
       setCategories(cats);
       setNotes(allNotes);
+      const configuredMode = settingsData.editViewMode === 'modal' ? 'modal' : 'tab';
+      setEditViewMode(configuredMode);
+      if (configuredMode !== 'tab' && activeTab === 'edit') {
+        setActiveTab('current');
+      }
       
       // Load matching notes for current page
-      if (urlParam || currentUrl) {
-        const url = urlParam ? decodeURIComponent(urlParam) : currentUrl;
-        const matching = await storageService.getNotesForUrl(url);
+      if (resolvedUrl) {
+        const matching = await storageService.getNotesForUrl(resolvedUrl);
         setMatchingNotes(matching);
       }
       
@@ -148,9 +162,18 @@ function MobileApp() {
     setShowForm(false);
   }
 
+  function openEditorSurface() {
+    const previousTab = activeTab === 'edit' ? 'current' : activeTab;
+    setReturnTab(previousTab);
+    if (editViewMode === 'tab') {
+      setActiveTab('edit');
+    }
+    setShowForm(true);
+  }
+
   function handleAddNew() {
     resetForm();
-    setShowForm(true);
+    openEditorSurface();
   }
 
   function handleEdit(note: PageNote) {
@@ -203,7 +226,7 @@ function MobileApp() {
       }
     }
     
-    setShowForm(true);
+    openEditorSurface();
   }
 
   async function handleDelete(note: PageNote) {
@@ -236,6 +259,7 @@ function MobileApp() {
     // Build recurring pattern if needed
     let recurringPattern: RecurringPattern | null = null;
     let scheduledTime: number | undefined = undefined;
+    let nextTrigger: number | undefined = undefined;
 
     if (hasReminder && reminderDate && reminderTime) {
       scheduledTime = new Date(`${reminderDate}T${reminderTime}`).getTime();
@@ -278,10 +302,35 @@ function MobileApp() {
       }
     }
 
+    if (hasReminder) {
+      if (scheduleType === 'recurring' && recurringPattern) {
+        nextTrigger = calculateNextTrigger(recurringPattern);
+      } else if (scheduleType === 'once' && scheduledTime) {
+        nextTrigger = scheduledTime;
+      }
+    }
+
+    const reminderUnchanged = Boolean(editingNote) &&
+      Boolean(editingNote?.hasReminder) === hasReminder &&
+      (!hasReminder || (
+        (editingNote?.scheduleType || 'once') === scheduleType &&
+        (
+          scheduleType === 'once'
+            ? (editingNote?.scheduledTime ?? null) === (scheduledTime ?? null)
+            : areRecurringPatternsEqual(editingNote?.recurringPattern ?? null, recurringPattern)
+        )
+      ));
+
+    if (editingNote && reminderUnchanged) {
+      scheduledTime = editingNote.scheduledTime ?? undefined;
+      recurringPattern = editingNote.recurringPattern ?? null;
+      nextTrigger = editingNote.nextTrigger;
+    }
+
     const note: PageNote = {
       id: editingNote?.id || Date.now().toString(),
-      url: currentUrl,
-      urlMatchType: 'exact',
+      url: editingNote?.url || currentUrl,
+      urlMatchType: editingNote?.urlMatchType || 'exact',
       title: noteTitle.trim(),
       content: noteContent.trim(),
       categoryId: noteCategoryId,
@@ -289,8 +338,9 @@ function MobileApp() {
       updatedAt: Date.now(),
       hasReminder,
       scheduleType: hasReminder ? scheduleType : undefined,
-      scheduledTime,
-      recurringPattern,
+      scheduledTime: hasReminder ? scheduledTime : undefined,
+      recurringPattern: hasReminder ? recurringPattern : undefined,
+      nextTrigger: hasReminder ? nextTrigger : undefined,
     };
 
     try {
@@ -304,14 +354,41 @@ function MobileApp() {
       // Reload data and reset form
       await loadData();
       resetForm();
+      await closeMobileEditorTab();
     } catch (error) {
       console.error('Error saving note:', error);
       alert('Error saving note: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
   }
 
+  async function closeMobileEditorTab() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const sourceTabIdParam = params.get('sourceTabId');
+      const sourceTabId = sourceTabIdParam ? Number(sourceTabIdParam) : NaN;
+
+      if (!Number.isNaN(sourceTabId)) {
+        try {
+          await browser.tabs.update(sourceTabId, { active: true });
+        } catch {
+          // Source tab may no longer exist
+        }
+      }
+
+      const currentTab = await browser.tabs.getCurrent();
+      if (currentTab?.id) {
+        await browser.tabs.remove(currentTab.id);
+      }
+    } catch (error) {
+      console.warn('Could not auto-close mobile editor tab:', error);
+    }
+  }
+
   function handleCancel() {
     resetForm();
+    if (editViewMode === 'tab') {
+      setActiveTab(returnTab);
+    }
   }
 
   async function handleForceSync() {
@@ -426,6 +503,24 @@ function MobileApp() {
           >
             📝 All Notes
           </button>
+          {editViewMode === 'tab' && (
+            <button
+              onClick={() => setActiveTab('edit')}
+              style={{
+                flex: 1,
+                padding: '16px',
+                fontSize: '16px',
+                fontWeight: 500,
+                background: activeTab === 'edit' ? '#f0f0f0' : 'transparent',
+                border: 'none',
+                borderBottom: activeTab === 'edit' ? '3px solid #4a90d9' : '3px solid transparent',
+                cursor: 'pointer',
+                touchAction: 'manipulation'
+              }}
+            >
+              ✏️ Edit
+            </button>
+          )}
           <button
             onClick={() => browser.tabs.create({ url: browser.runtime.getURL('options/index.html') })}
             style={{
@@ -525,7 +620,7 @@ function MobileApp() {
             )}
 
             {/* Form */}
-            {showForm && (
+            {showForm && editViewMode === 'tab' && activeTab === 'current' && (
               <NoteForm
                 title={noteTitle}
                 content={noteContent}
@@ -640,69 +735,139 @@ function MobileApp() {
                 {filterCategory ? 'No notes in this category' : 'No notes yet'}
               </div>
             )}
+          </>
+        )}
 
-            {/* Form for editing */}
-            {showForm && (
-              <div style={{ 
-                position: 'fixed', 
-                top: 0, 
-                left: 0, 
-                right: 0, 
-                bottom: 0, 
-                background: '#fff',
-                zIndex: 100,
-                overflowY: 'auto',
-                padding: '20px'
-              }}>
-                <NoteForm
-                  title={noteTitle}
-                  content={noteContent}
-                  categoryId={noteCategoryId}
-                  hasReminder={hasReminder}
-                  scheduleType={scheduleType}
-                  reminderDate={reminderDate}
-                  reminderTime={reminderTime}
-                  recFrequency={recFrequency}
-                  recInterval={recInterval}
-                  recEndType={recEndType}
-                  recEndCount={recEndCount}
-                  recEndDate={recEndDate}
-                  recWeekdays={recWeekdays}
-                  recMonthlyMode={recMonthlyMode}
-                  recDayOfMonth={recDayOfMonth}
-                  recOrdinal={recOrdinal}
-                  recOrdinalWeekday={recOrdinalWeekday}
-                  recTimeHour={recTimeHour}
-                  recTimeMinute={recTimeMinute}
-                  categories={categories}
-                  isEditing={!!editingNote}
-                  onTitleChange={setNoteTitle}
-                  onContentChange={setNoteContent}
-                  onCategoryChange={setNoteCategoryId}
-                  onHasReminderChange={setHasReminder}
-                  onScheduleTypeChange={setScheduleType}
-                  onReminderDateChange={setReminderDate}
-                  onReminderTimeChange={setReminderTime}
-                  onRecFrequencyChange={setRecFrequency}
-                  onRecIntervalChange={setRecInterval}
-                  onRecEndTypeChange={setRecEndType}
-                  onRecEndCountChange={setRecEndCount}
-                  onRecEndDateChange={setRecEndDate}
-                  onRecWeekdaysChange={setRecWeekdays}
-                  onRecMonthlyModeChange={setRecMonthlyMode}
-                  onRecDayOfMonthChange={setRecDayOfMonth}
-                  onRecOrdinalChange={setRecOrdinal}
-                  onRecOrdinalWeekdayChange={setRecOrdinalWeekday}
-                  onRecTimeHourChange={setRecTimeHour}
-                  onRecTimeMinuteChange={setRecTimeMinute}
-                  onSave={handleSave}
-                  onCancel={handleCancel}
-                />
+        {activeTab === 'edit' && editViewMode === 'tab' && (
+          <>
+            {!showForm ? (
+              <div style={{ textAlign: 'center', padding: '30px 10px', color: '#666' }}>
+                <div style={{ marginBottom: '10px' }}>Select a note to edit from "This Page" or "All Notes".</div>
+                <button
+                  onClick={handleAddNew}
+                  style={{
+                    padding: '12px 18px',
+                    fontSize: '15px',
+                    fontWeight: 500,
+                    background: '#4a90d9',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    touchAction: 'manipulation'
+                  }}
+                >
+                  ➕ Add New Note
+                </button>
               </div>
+            ) : (
+              <NoteForm
+                title={noteTitle}
+                content={noteContent}
+                categoryId={noteCategoryId}
+                hasReminder={hasReminder}
+                scheduleType={scheduleType}
+                reminderDate={reminderDate}
+                reminderTime={reminderTime}
+                recFrequency={recFrequency}
+                recInterval={recInterval}
+                recEndType={recEndType}
+                recEndCount={recEndCount}
+                recEndDate={recEndDate}
+                recWeekdays={recWeekdays}
+                recMonthlyMode={recMonthlyMode}
+                recDayOfMonth={recDayOfMonth}
+                recOrdinal={recOrdinal}
+                recOrdinalWeekday={recOrdinalWeekday}
+                recTimeHour={recTimeHour}
+                recTimeMinute={recTimeMinute}
+                categories={categories}
+                isEditing={!!editingNote}
+                onTitleChange={setNoteTitle}
+                onContentChange={setNoteContent}
+                onCategoryChange={setNoteCategoryId}
+                onHasReminderChange={setHasReminder}
+                onScheduleTypeChange={setScheduleType}
+                onReminderDateChange={setReminderDate}
+                onReminderTimeChange={setReminderTime}
+                onRecFrequencyChange={setRecFrequency}
+                onRecIntervalChange={setRecInterval}
+                onRecEndTypeChange={setRecEndType}
+                onRecEndCountChange={setRecEndCount}
+                onRecEndDateChange={setRecEndDate}
+                onRecWeekdaysChange={setRecWeekdays}
+                onRecMonthlyModeChange={setRecMonthlyMode}
+                onRecDayOfMonthChange={setRecDayOfMonth}
+                onRecOrdinalChange={setRecOrdinal}
+                onRecOrdinalWeekdayChange={setRecOrdinalWeekday}
+                onRecTimeHourChange={setRecTimeHour}
+                onRecTimeMinuteChange={setRecTimeMinute}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
             )}
           </>
         )}
       </div>
+
+      {showForm && editViewMode === 'modal' && (
+        <div style={{ 
+          position: 'fixed', 
+          top: 0, 
+          left: 0, 
+          right: 0, 
+          bottom: 0, 
+          background: '#fff',
+          zIndex: 100,
+          overflowY: 'auto',
+          padding: '20px'
+        }}>
+          <NoteForm
+            title={noteTitle}
+            content={noteContent}
+            categoryId={noteCategoryId}
+            hasReminder={hasReminder}
+            scheduleType={scheduleType}
+            reminderDate={reminderDate}
+            reminderTime={reminderTime}
+            recFrequency={recFrequency}
+            recInterval={recInterval}
+            recEndType={recEndType}
+            recEndCount={recEndCount}
+            recEndDate={recEndDate}
+            recWeekdays={recWeekdays}
+            recMonthlyMode={recMonthlyMode}
+            recDayOfMonth={recDayOfMonth}
+            recOrdinal={recOrdinal}
+            recOrdinalWeekday={recOrdinalWeekday}
+            recTimeHour={recTimeHour}
+            recTimeMinute={recTimeMinute}
+            categories={categories}
+            isEditing={!!editingNote}
+            onTitleChange={setNoteTitle}
+            onContentChange={setNoteContent}
+            onCategoryChange={setNoteCategoryId}
+            onHasReminderChange={setHasReminder}
+            onScheduleTypeChange={setScheduleType}
+            onReminderDateChange={setReminderDate}
+            onReminderTimeChange={setReminderTime}
+            onRecFrequencyChange={setRecFrequency}
+            onRecIntervalChange={setRecInterval}
+            onRecEndTypeChange={setRecEndType}
+            onRecEndCountChange={setRecEndCount}
+            onRecEndDateChange={setRecEndDate}
+            onRecWeekdaysChange={setRecWeekdays}
+            onRecMonthlyModeChange={setRecMonthlyMode}
+            onRecDayOfMonthChange={setRecDayOfMonth}
+            onRecOrdinalChange={setRecOrdinal}
+            onRecOrdinalWeekdayChange={setRecOrdinalWeekday}
+            onRecTimeHourChange={setRecTimeHour}
+            onRecTimeMinuteChange={setRecTimeMinute}
+            onSave={handleSave}
+            onCancel={handleCancel}
+          />
+        </div>
+      )}
 
       {/* Footer with version */}
       <div style={{

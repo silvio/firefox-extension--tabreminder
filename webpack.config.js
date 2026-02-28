@@ -6,7 +6,13 @@ const { execSync } = require('child_process');
 
 // Get version info at build time
 const packageJson = require('./package.json');
-const gitHash = execSync('git rev-parse --short HEAD').toString().trim();
+let gitHash = 'dev';
+try {
+  gitHash = execSync('git rev-parse --short HEAD').toString().trim();
+} catch {
+  // Fallback for restricted environments where spawning git is blocked.
+  gitHash = process.env.GIT_HASH || 'dev';
+}
 
 module.exports = (env, argv) => {
   console.log('Building universal package (desktop + Android)');

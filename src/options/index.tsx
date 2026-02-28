@@ -99,6 +99,8 @@ function Options() {
   }[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
+  const [loadingRemoteFile, setLoadingRemoteFile] = useState<string | null>(null);
+  const [remoteFilePreview, setRemoteFilePreview] = useState<{ title: string; content: string } | null>(null);
 
 
   // Pagination for Notes with Reminders
@@ -411,6 +413,7 @@ function Options() {
 
   async function handleDiscoverCategories() {
     setDiscovering(true);
+    setRemoteFilePreview(null);
     try {
       const discovered = await storageService.discoverCategoriesOnServer();
       setDiscoveredCategories(discovered);
@@ -438,6 +441,27 @@ function Options() {
       alert('Failed to import category: ' + (error as Error).message);
     } finally {
       setImporting(null);
+    }
+  }
+
+  async function handleViewCategoryFile(category: { categoryName: string; filename: string }) {
+    setLoadingRemoteFile(category.filename);
+    try {
+      const file = await storageService.getCategoryFileFromServer(category.filename);
+      if (!file) {
+        alert('Category file not found on server');
+        return;
+      }
+
+      setRemoteFilePreview({
+        title: `${category.categoryName} (${category.filename})`,
+        content: JSON.stringify(file, null, 2),
+      });
+    } catch (error) {
+      console.error('View remote file error:', error);
+      alert('Failed to load remote file: ' + (error as Error).message);
+    } finally {
+      setLoadingRemoteFile(null);
     }
   }
 
@@ -872,31 +896,104 @@ function Options() {
                           {cat.noteCount} notes • {cat.existsLocally ? 'Already imported' : 'Server only'}
                         </div>
                       </div>
-                      {!cat.existsLocally && (
+                      <div style={{ display: 'flex', gap: '8px' }}>
                         <button
-                          onClick={() => handleImportCategory(cat.categoryId)}
-                          disabled={importing === cat.categoryId}
+                          onClick={() => handleViewCategoryFile(cat)}
+                          disabled={loadingRemoteFile === cat.filename}
                           style={{
                             padding: '6px 12px',
-                            backgroundColor: '#7cb342',
+                            backgroundColor: '#4a90d9',
                             color: '#fff',
                             border: 'none',
                             borderRadius: '4px',
-                            cursor: importing === cat.categoryId ? 'not-allowed' : 'pointer',
+                            cursor: loadingRemoteFile === cat.filename ? 'not-allowed' : 'pointer',
                             fontSize: '12px',
                             fontWeight: 500,
-                            opacity: importing === cat.categoryId ? 0.6 : 1,
+                            opacity: loadingRemoteFile === cat.filename ? 0.6 : 1,
                           }}
                         >
-                          {importing === cat.categoryId ? '⏳ Importing...' : '📥 Import'}
+                          {loadingRemoteFile === cat.filename ? '⏳ Loading...' : '📄 View JSON'}
                         </button>
-                      )}
+                        {!cat.existsLocally && (
+                          <button
+                            onClick={() => handleImportCategory(cat.categoryId)}
+                            disabled={importing === cat.categoryId}
+                            style={{
+                              padding: '6px 12px',
+                              backgroundColor: '#7cb342',
+                              color: '#fff',
+                              border: 'none',
+                              borderRadius: '4px',
+                              cursor: importing === cat.categoryId ? 'not-allowed' : 'pointer',
+                              fontSize: '12px',
+                              fontWeight: 500,
+                              opacity: importing === cat.categoryId ? 0.6 : 1,
+                            }}
+                          >
+                            {importing === cat.categoryId ? '⏳ Importing...' : '📥 Import'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
               ) : (
                 <div style={{ padding: '20px', textAlign: 'center', color: '#666', fontSize: '13px' }}>
                   {discovering ? 'Scanning server...' : 'Click "Discover Categories" to scan the WebDAV server for category files.'}
+                </div>
+              )}
+
+              {remoteFilePreview && (
+                <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid #ddd' }}>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
+                    📄 Remote File Preview
+                  </h4>
+                  <div style={{ marginBottom: '8px', fontSize: '13px', fontWeight: 500 }}>
+                    {remoteFilePreview.title}
+                  </div>
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: '12px',
+                      backgroundColor: '#1e1e1e',
+                      color: '#d4d4d4',
+                      borderRadius: '8px',
+                      overflowX: 'auto',
+                      maxHeight: '360px',
+                      fontSize: '12px',
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    {remoteFilePreview.content}
+                  </pre>
+                  <div style={{ marginTop: '10px', display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(remoteFilePreview.content)}
+                      style={{
+                        padding: '8px 12px',
+                        backgroundColor: '#4a90d9',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Copy JSON
+                    </button>
+                    <button
+                      onClick={() => setRemoteFilePreview(null)}
+                      style={{
+                        padding: '8px 12px',
+                        backgroundColor: '#666',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Close Preview
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1217,21 +1314,47 @@ function Options() {
             </label>
             <input
               type="number"
-              min="400"
+              min="600"
               max="1200"
               step="50"
               value={settings.popupHeight}
               placeholder="600"
-              onChange={(e) =>
+              onChange={(e) => {
+                const parsedValue = Number(e.target.value);
+                const popupHeight = Number.isFinite(parsedValue)
+                  ? Math.max(600, Math.min(1200, parsedValue))
+                  : 600;
                 setSettings({
                   ...settings,
-                  popupHeight: Number(e.target.value),
-                })
-              }
+                  popupHeight,
+                });
+              }}
               style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '4px' }}
             />
             <div style={{ fontSize: '13px', color: '#666', marginTop: '4px' }}>
-              Height of the popup window in pixels (400-1200px, default: 600px)
+              Height of the popup window in pixels (600-1200px, default: 600px)
+            </div>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
+              Edit View Mode:
+            </label>
+            <select
+              value={settings.editViewMode || 'tab'}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  editViewMode: e.target.value === 'modal' ? 'modal' : 'tab',
+                })
+              }
+              style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '4px' }}
+            >
+              <option value="tab">Edit Tab (recommended)</option>
+              <option value="modal">Modal Window</option>
+            </select>
+            <div style={{ fontSize: '13px', color: '#666', marginTop: '4px' }}>
+              Choose how note editing opens in popup and mobile views.
             </div>
           </div>
         </div>
