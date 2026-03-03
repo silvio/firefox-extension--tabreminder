@@ -19,6 +19,7 @@ export interface PageNote {
   categoryId: string | null;
   createdAt: number;
   updatedAt: number;
+  version?: number; // Monotonic counter for deterministic sync conflict resolution
   // Optional reminder fields
   hasReminder?: boolean;
   scheduleType?: ScheduleType;
@@ -28,6 +29,9 @@ export interface PageNote {
   // Soft delete fields
   deleted?: boolean;
   deletedAt?: number;
+  // Hard-delete tombstone fields (after Empty Trash)
+  hardDeleted?: boolean;
+  hardDeletedAt?: number;
 }
 
 export type ScheduleType = 'once' | 'recurring';
@@ -96,6 +100,7 @@ export interface SyncedSettings {
 // These contain sensitive data and should NOT sync
 export interface LocalSettings {
   lastDeleteAllTimestamp?: number;
+  lastUsedCategoryId?: string; // Last used category for new-note preselection (per-device)
   webdavUsername?: string; // Credentials are per-device
   webdavPassword?: string; // NEVER sync passwords!
   webdavBasePath?: string; // Paths are per-device
@@ -106,6 +111,16 @@ export interface LocalSettings {
 
 // Combined settings interface for backwards compatibility
 export interface Settings extends SyncedSettings, LocalSettings {}
+
+export interface WebDAVOutboxEntry {
+  categoryId: string;
+  attempts: number;
+  nextAttemptAt: number;
+  lastAttemptAt?: number;
+  lastError?: string;
+}
+
+export type WebDAVOutboxState = Record<string, WebDAVOutboxEntry>;
 
 
 export interface CategoryFile {

@@ -9,8 +9,9 @@ import { storageService } from '../shared/services/storage';
 import { alarmService } from '../shared/services/alarms';
 import { PageNote, TimeReminder, Category, UrlMatchType, TriggeredReminder, RecurringPattern, FrequencyType, EndCondition, ScheduleType } from '../shared/types';
 import { createNote, createReminder, getUrlMatchPreview } from '../shared/utils/helpers';
-import { parseTimeInput, formatDate, formatRelativeTime, getNextOccurrences, calculateNextTrigger, describeRecurringPattern } from '../shared/utils/timeParser';
+import { parseTimeInput, formatDate, formatRelativeTime, getNextOccurrences, describeRecurringPattern } from '../shared/utils/timeParser';
 import { usePopupState } from '../shared/hooks/usePopupState';
+import { buildReminderFields } from '../shared/core/reminderFields';
 
 type Tab = 'current' | 'notes' | 'reminders' | 'triggered' | 'edit';
 
@@ -71,10 +72,6 @@ function getPageRemindersFromNotes(notes: PageNote[]): TimeReminder[] {
     .sort((a, b) => a.nextTrigger - b.nextTrigger);
 }
 
-function areRecurringPatternsEqual(a?: RecurringPattern | null, b?: RecurringPattern | null): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-}
-
 function Popup() {
   const { state: popupState, updateState: updatePopupState, resetNoteForm, resetReminderForm } = usePopupState();
   const [activeTab, setActiveTab] = useState<Tab>(popupState.activeTab as Tab);
@@ -89,6 +86,7 @@ function Popup() {
   const [filterCategory, setFilterCategory] = useState<string>(popupState.filterCategory);
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState<any>(null);
+  const [lastUsedCategoryId, setLastUsedCategoryId] = useState<string | null>(null);
   const [editingNote, setEditingNote] = useState<PageNote | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
 
@@ -118,13 +116,14 @@ function Popup() {
 
   async function loadData() {
     try {
-      const [tabs, notesData, remindersData, categoriesData, triggeredData, settingsData] = await Promise.all([
+      const [tabs, notesData, remindersData, categoriesData, triggeredData, settingsData, lastUsedCategory] = await Promise.all([
         browser.tabs.query({ active: true, currentWindow: true }),
         storageService.getNotes(),
         storageService.getReminders(),
         storageService.getCategories(),
         storageService.getTriggeredReminders(),
         storageService.getSettings(),
+        storageService.getLastUsedCategoryId(),
       ]);
 
       const url = tabs[0]?.url || '';
@@ -136,6 +135,7 @@ function Popup() {
       setCategories(categoriesData);
       setTriggeredReminders(triggeredData);
       setSettings(settingsData);
+      setLastUsedCategoryId(lastUsedCategory);
 
       if (url) {
         const matching = await storageService.getNotesForUrl(url);
@@ -255,6 +255,53 @@ function Popup() {
     }
   }
 
+  async function persistNoteAndRefresh(note: PageNote): Promise<void> {
+    await storageService.saveNote(note);
+    // Trigger immediate sync (no debounce) so sync happens even if popup closes immediately.
+    if (note.categoryId) {
+      await storageService.triggerWebDAVSyncImmediate(note.categoryId);
+      setLastUsedCategoryId(note.categoryId);
+    }
+    const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+      storageService.getNotes(),
+      storageService.getNotesForUrl(currentUrl),
+      storageService.getReminders(),
+    ]);
+    setNotes(updatedNotes);
+    setMatchingNotes(updatedMatchingNotes);
+    setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+    setReminders(updatedReminders);
+    browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
+    resetNoteForm();
+  }
+
+  async function deleteNoteAndRefresh(id: string): Promise<void> {
+    await storageService.deleteNote(id);
+    const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
+      storageService.getNotes(),
+      storageService.getNotesForUrl(currentUrl),
+      storageService.getReminders(),
+    ]);
+    setNotes(updatedNotes);
+    setMatchingNotes(updatedMatchingNotes);
+    setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+    setReminders(updatedReminders);
+    browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
+    resetNoteForm();
+  }
+
+  async function deleteReminderAndRefresh(id: string): Promise<void> {
+    await storageService.deleteReminder(id);
+    const [updatedReminders, updatedMatchingNotes] = await Promise.all([
+      storageService.getReminders(),
+      storageService.getNotesForUrl(currentUrl),
+    ]);
+    setReminders(updatedReminders);
+    setMatchingNotes(updatedMatchingNotes);
+    setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
+    browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+  }
+
   if (loading) {
     return <div style={{ padding: '16px' }}>Loading...</div>;
   }
@@ -345,6 +392,7 @@ function Popup() {
             pageReminders={pageReminders}
             categories={categories}
             preselectLastCategory={settings.preselectLastCategory}
+            lastUsedCategoryId={lastUsedCategoryId}
             editingNote={null}
             savedState={{
               title: popupState.noteTitle,
@@ -361,51 +409,17 @@ function Popup() {
               noteMatchUrl: state.matchUrl,
             })}
             onSave={async (note) => {
-              await storageService.saveNote(note);
-              // Trigger immediate sync (no debounce) so sync happens even if popup closes immediately
-              if (note.categoryId) {
-                await storageService.triggerWebDAVSyncImmediate(note.categoryId);
-              }
-              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
-                storageService.getNotes(),
-                storageService.getNotesForUrl(currentUrl),
-                storageService.getReminders(),
-              ]);
-              setNotes(updatedNotes);
-              setMatchingNotes(updatedMatchingNotes);
-              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-              setReminders(updatedReminders);
-              browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
-              resetNoteForm();
+              await persistNoteAndRefresh(note);
             }}
             onDelete={async (id) => {
-              await storageService.deleteNote(id);
-              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
-                storageService.getNotes(),
-                storageService.getNotesForUrl(currentUrl),
-                storageService.getReminders(),
-              ]);
-              setNotes(updatedNotes);
-              setMatchingNotes(updatedMatchingNotes);
-              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-              setReminders(updatedReminders);
-              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
-              resetNoteForm();
+              await deleteNoteAndRefresh(id);
             }}
             onEditNote={(note) => {
               openEditor(note);
             }}
             onCancelEdit={() => closeEditor('current')}
             onDeleteReminder={async (id) => {
-              await storageService.deleteReminder(id);
-              const [updatedReminders, updatedMatchingNotes] = await Promise.all([
-                storageService.getReminders(),
-                storageService.getNotesForUrl(currentUrl),
-              ]);
-              setReminders(updatedReminders);
-              setMatchingNotes(updatedMatchingNotes);
-              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-              browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+              await deleteReminderAndRefresh(id);
             }}
           />
         )}
@@ -453,6 +467,7 @@ function Popup() {
             pageReminders={pageReminders}
             categories={categories}
             preselectLastCategory={settings.preselectLastCategory}
+            lastUsedCategoryId={lastUsedCategoryId}
             editingNote={editingNote}
             savedState={{
               title: popupState.noteTitle,
@@ -469,49 +484,16 @@ function Popup() {
               noteMatchUrl: state.matchUrl,
             })}
             onSave={async (note) => {
-              await storageService.saveNote(note);
-              if (note.categoryId) {
-                await storageService.triggerWebDAVSyncImmediate(note.categoryId);
-              }
-              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
-                storageService.getNotes(),
-                storageService.getNotesForUrl(currentUrl),
-                storageService.getReminders(),
-              ]);
-              setNotes(updatedNotes);
-              setMatchingNotes(updatedMatchingNotes);
-              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-              setReminders(updatedReminders);
-              browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
-              resetNoteForm();
+              await persistNoteAndRefresh(note);
             }}
             onDelete={async (id) => {
-              await storageService.deleteNote(id);
-              const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
-                storageService.getNotes(),
-                storageService.getNotesForUrl(currentUrl),
-                storageService.getReminders(),
-              ]);
-              setNotes(updatedNotes);
-              setMatchingNotes(updatedMatchingNotes);
-              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-              setReminders(updatedReminders);
-              browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
-              resetNoteForm();
+              await deleteNoteAndRefresh(id);
               closeEditor('notes');
             }}
             onEditNote={(note) => openEditor(note)}
             onCancelEdit={() => closeEditor('notes')}
             onDeleteReminder={async (id) => {
-              await storageService.deleteReminder(id);
-              const [updatedReminders, updatedMatchingNotes] = await Promise.all([
-                storageService.getReminders(),
-                storageService.getNotesForUrl(currentUrl),
-              ]);
-              setReminders(updatedReminders);
-              setMatchingNotes(updatedMatchingNotes);
-              setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-              browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+              await deleteReminderAndRefresh(id);
             }}
             editorOnly
             requireEditingNote
@@ -574,6 +556,7 @@ function Popup() {
               pageReminders={pageReminders}
               categories={categories}
               preselectLastCategory={settings.preselectLastCategory}
+              lastUsedCategoryId={lastUsedCategoryId}
               editingNote={editingNote}
               savedState={{
                 title: popupState.noteTitle,
@@ -590,49 +573,16 @@ function Popup() {
                 noteMatchUrl: state.matchUrl,
               })}
               onSave={async (note) => {
-                await storageService.saveNote(note);
-                if (note.categoryId) {
-                  await storageService.triggerWebDAVSyncImmediate(note.categoryId);
-                }
-                const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
-                  storageService.getNotes(),
-                  storageService.getNotesForUrl(currentUrl),
-                  storageService.getReminders(),
-                ]);
-                setNotes(updatedNotes);
-                setMatchingNotes(updatedMatchingNotes);
-                setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-                setReminders(updatedReminders);
-                browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
-                resetNoteForm();
+                await persistNoteAndRefresh(note);
               }}
               onDelete={async (id) => {
-                await storageService.deleteNote(id);
-                const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
-                  storageService.getNotes(),
-                  storageService.getNotesForUrl(currentUrl),
-                  storageService.getReminders(),
-                ]);
-                setNotes(updatedNotes);
-                setMatchingNotes(updatedMatchingNotes);
-                setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-                setReminders(updatedReminders);
-                browser.runtime.sendMessage({ type: 'NOTE_DELETED' });
-                resetNoteForm();
+                await deleteNoteAndRefresh(id);
                 closeEditor(activeTab);
               }}
               onEditNote={(note) => openEditor(note, 'modal')}
               onCancelEdit={() => closeEditor(activeTab)}
               onDeleteReminder={async (id) => {
-                await storageService.deleteReminder(id);
-                const [updatedReminders, updatedMatchingNotes] = await Promise.all([
-                  storageService.getReminders(),
-                  storageService.getNotesForUrl(currentUrl),
-                ]);
-                setReminders(updatedReminders);
-                setMatchingNotes(updatedMatchingNotes);
-                setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
-                browser.runtime.sendMessage({ type: 'REMINDER_DELETED' });
+                await deleteReminderAndRefresh(id);
               }}
               editorOnly
               requireEditingNote
@@ -690,6 +640,7 @@ interface CurrentPageTabProps {
   pageReminders: TimeReminder[];
   categories: Category[];
   preselectLastCategory: boolean;
+  lastUsedCategoryId: string | null;
   savedState: NoteFormState;
   editingNote: PageNote | null;
   onStateChange: (state: NoteFormState) => void;
@@ -709,6 +660,7 @@ function CurrentPageTab({
   pageReminders,
   categories,
   preselectLastCategory,
+  lastUsedCategoryId,
   savedState,
   editingNote,
   onStateChange,
@@ -720,14 +672,26 @@ function CurrentPageTab({
   editorOnly = false,
   requireEditingNote = false,
 }: CurrentPageTabProps) {
+  function resolveInitialCategory(): string {
+    if (savedState.categoryId) {
+      return savedState.categoryId;
+    }
+    if (
+      preselectLastCategory &&
+      lastUsedCategoryId &&
+      categories.some((category) => category.id === lastUsedCategoryId)
+    ) {
+      return lastUsedCategoryId;
+    }
+    return '';
+  }
+
   const [title, setTitle] = useState(savedState.title || pageTitle);
   const [content, setContent] = useState(savedState.content);
   const [urlMatchType, setUrlMatchType] = useState<UrlMatchType>(
     savedState.urlMatchType || 'exact'
   );
-  const [categoryId, setCategoryId] = useState<string>(
-    preselectLastCategory ? savedState.categoryId : ''
-  );
+  const [categoryId, setCategoryId] = useState<string>(resolveInitialCategory());
   const [matchUrl, setMatchUrl] = useState<string>(savedState.matchUrl || url);
   
   // Reminder state
@@ -786,6 +750,7 @@ function CurrentPageTab({
       if (!savedState.title && pageTitle) {
         setTitle(pageTitle);
       }
+      setCategoryId(resolveInitialCategory());
       setMatchUrl(url);
       // Reset reminder fields
       setHasReminder(false);
@@ -806,7 +771,7 @@ function CurrentPageTab({
       setRecTimeHour(defaultHour);
       setRecTimeMinute(defaultMinute);
     }
-  }, [editingNote, url, pageTitle]);
+  }, [editingNote, url, pageTitle, preselectLastCategory, lastUsedCategoryId, categories, savedState.categoryId]);
 
   useEffect(() => {
     onStateChange({ title, content, urlMatchType, categoryId, matchUrl });
@@ -872,56 +837,13 @@ function CurrentPageTab({
     const finalRecurringPattern = hasReminder && scheduleType === 'recurring'
       ? buildRecurringPattern()
       : null;
-    const existingHasReminder = Boolean(editingNote?.hasReminder);
-    const reminderUnchanged =
-      Boolean(editingNote) &&
-      existingHasReminder === hasReminder &&
-      (!hasReminder || (
-        (editingNote?.scheduleType || 'once') === scheduleType &&
-        (
-          scheduleType === 'once'
-            ? (editingNote?.scheduledTime ?? null) === (scheduledTime ?? null)
-            : areRecurringPatternsEqual(editingNote?.recurringPattern ?? null, finalRecurringPattern)
-        )
-      ));
-
-    let reminderFields: Pick<PageNote, 'hasReminder' | 'scheduleType' | 'scheduledTime' | 'recurringPattern' | 'nextTrigger'>;
-    if (editingNote && reminderUnchanged) {
-      // Preserve existing reminder timing when only note fields changed.
-      reminderFields = {
-        hasReminder: editingNote.hasReminder,
-        scheduleType: editingNote.scheduleType,
-        scheduledTime: editingNote.scheduledTime,
-        recurringPattern: editingNote.recurringPattern,
-        nextTrigger: editingNote.nextTrigger,
-      };
-    } else if (!hasReminder) {
-      reminderFields = {
-        hasReminder: false,
-        scheduleType: undefined,
-        scheduledTime: undefined,
-        recurringPattern: undefined,
-        nextTrigger: undefined,
-      };
-    } else if (scheduleType === 'recurring' && finalRecurringPattern) {
-      const nextTrigger = calculateNextTrigger(finalRecurringPattern);
-      reminderFields = {
-        hasReminder: true,
-        scheduleType: 'recurring',
-        scheduledTime: nextTrigger,
-        recurringPattern: finalRecurringPattern,
-        nextTrigger,
-      };
-    } else {
-      const nextTrigger = scheduledTime ?? undefined;
-      reminderFields = {
-        hasReminder: true,
-        scheduleType: 'once',
-        scheduledTime: scheduledTime ?? undefined,
-        recurringPattern: null,
-        nextTrigger,
-      };
-    }
+    const reminderFields = buildReminderFields({
+      editingNote,
+      hasReminder,
+      scheduleType,
+      scheduledTime,
+      recurringPattern: finalRecurringPattern,
+    });
 
     const updatedNote: PageNote = {
       ...baseNote,

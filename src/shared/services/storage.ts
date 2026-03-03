@@ -10,6 +10,8 @@ import {
   DEFAULT_CATEGORIES,
   DEFAULT_SETTINGS,
   CategoryFile,
+  WebDAVOutboxEntry,
+  WebDAVOutboxState,
 } from '../types';
 import { webdavService, WebDAVAuthError, WebDAVNetworkError } from './webdav';
 import { alarmService } from './alarms';
@@ -20,6 +22,7 @@ export const STORAGE_KEYS = {
   CATEGORIES: 'categories',
   SETTINGS: 'settings',
   TRIGGERED_REMINDERS: 'triggeredReminders',
+  WEBDAV_OUTBOX: 'webdavOutbox',
 } as const;
 
 const SYNCED_SETTING_KEYS = [
@@ -35,6 +38,7 @@ const SYNCED_SETTING_KEYS = [
 
 const LOCAL_SETTING_KEYS = [
   'lastDeleteAllTimestamp',
+  'lastUsedCategoryId',
   'webdavUsername',
   'webdavPassword',
   'webdavBasePath',
@@ -47,6 +51,8 @@ type StorageArea = 'local' | 'sync';
 
 class StorageService {
   private webdavSyncTimeouts: Map<string, NodeJS.Timeout> = new Map();
+  private webdavSyncInFlight: Set<string> = new Set();
+  private webdavRetryTimer: NodeJS.Timeout | null = null;
   private autoSyncInterval: NodeJS.Timeout | null = null;
 
   constructor() {}
@@ -75,7 +81,8 @@ class StorageService {
           webdavSyncInterval: oldSettings.webdavSyncInterval,
           webdavLastSync: oldSettings.webdavLastSync,
           webdavSyncErrors: oldSettings.webdavSyncErrors,
-          lastDeleteAllTimestamp: oldSettings.lastDeleteAllTimestamp
+          lastDeleteAllTimestamp: oldSettings.lastDeleteAllTimestamp,
+          lastUsedCategoryId: oldSettings.lastUsedCategoryId,
         };
         
         // Save credentials to local storage
@@ -224,19 +231,20 @@ class StorageService {
     await this.migrateRemindersToNotes();
     await this.backfillUpdatedAtTimestamps();
     await this.backfillDeletedFlag();
+    await this.backfillNoteVersionAndTombstones();
     await this.migrateSettings();
     await this.migrateCategoryColors();
     await this.migrateCategoryUpdatedAt();
     await this.applySyncedCategoryColors();
-
-    // Clean up old deleted notes based on lastDeleteAllTimestamp
-    await this.cleanupOldDeletedNotes();
 
     // Start WebDAV auto-sync if enabled
     const settings = await this.getSettings();
     if (settings.webdavEnabled) {
       await this.startAutoSync();
     }
+
+    // Flush any persisted category uploads that were pending from a prior lifecycle.
+    await this.flushPendingWebDAVSync('initialize');
   }
 
 
@@ -274,6 +282,7 @@ class StorageService {
           categoryId: reminder.categoryId,
           createdAt: reminder.createdAt,
           updatedAt: Date.now(),
+          version: 1,
           hasReminder: true,
           scheduleType: reminder.scheduleType,
           scheduledTime: reminder.scheduledTime,
@@ -355,6 +364,50 @@ class StorageService {
     console.log(`Migration v3: Backfilled deleted flag for ${backfilled} notes`);
   }
 
+  // Migration v4: Backfill note version and classify legacy erased deletes as tombstones
+  async backfillNoteVersionAndTombstones(): Promise<void> {
+    const storage = this.getStorage('local');
+    const data = await storage.get(['migrationVersion', STORAGE_KEYS.NOTES]);
+
+    const migrationVersion = (data.migrationVersion as number) || 0;
+    if (migrationVersion >= 4) {
+      return;
+    }
+
+    const notes = (data[STORAGE_KEYS.NOTES] as PageNote[]) || [];
+    let backfilledVersion = 0;
+    let classifiedTombstones = 0;
+
+    for (const note of notes) {
+      if (note.version === undefined || note.version < 1) {
+        note.version = 1;
+        backfilledVersion++;
+      }
+
+      const looksLikeLegacyErasedDelete =
+        note.deleted === true &&
+        !note.hardDeleted &&
+        !note.title &&
+        !note.content &&
+        !note.url;
+
+      if (looksLikeLegacyErasedDelete) {
+        note.hardDeleted = true;
+        note.hardDeletedAt = note.deletedAt || note.updatedAt || Date.now();
+        classifiedTombstones++;
+      }
+    }
+
+    await storage.set({
+      [STORAGE_KEYS.NOTES]: notes,
+      migrationVersion: 4,
+    });
+
+    console.log(
+      `Migration v4: Backfilled version for ${backfilledVersion} notes, classified ${classifiedTombstones} legacy tombstones`
+    );
+  }
+
   // Notes
   async getNotes(): Promise<PageNote[]> {
     // ALWAYS read from local storage - local is source of truth
@@ -370,7 +423,7 @@ class StorageService {
     const storage = this.getStorage('local');
     const data = await storage.get(STORAGE_KEYS.NOTES);
     const allNotes = (data[STORAGE_KEYS.NOTES] as PageNote[]) || [];
-    return allNotes.filter(note => note.deleted === true);
+    return allNotes.filter(note => note.deleted === true && note.hardDeleted !== true);
   }
 
   private async getAllNotesIncludingDeleted(): Promise<PageNote[]> {
@@ -380,28 +433,48 @@ class StorageService {
     return (data[STORAGE_KEYS.NOTES] as PageNote[]) || [];
   }
 
+  private getNextNoteVersion(existing: PageNote | undefined, incoming?: number): number {
+    const existingVersion = existing?.version || 0;
+    const incomingVersion = incoming || 0;
+    if (!existing) {
+      return Math.max(1, incomingVersion || 1);
+    }
+    return Math.max(existingVersion, incomingVersion) + 1;
+  }
+
   async saveNote(note: PageNote): Promise<void> {
     const notes = await this.getAllNotesIncludingDeleted();
     const index = notes.findIndex((n) => n.id === note.id);
+    const existing = index >= 0 ? notes[index] : undefined;
+    const noteToSave: PageNote = {
+      ...note,
+      version: this.getNextNoteVersion(existing, note.version),
+      updatedAt: note.updatedAt || Date.now(),
+    };
+
     if (index >= 0) {
-      notes[index] = note;
+      notes[index] = noteToSave;
     } else {
-      notes.push(note);
+      notes.push(noteToSave);
     }
     
     // Write to local storage (source of truth)
     await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: notes });
 
     // Schedule alarm if note has a reminder
-    if (note.hasReminder && note.nextTrigger) {
-      await alarmService.scheduleNoteReminder(note);
-    } else if (note.hasReminder === false) {
+    if (noteToSave.hasReminder && noteToSave.nextTrigger) {
+      await alarmService.scheduleNoteReminder(noteToSave);
+    } else if (noteToSave.hasReminder === false) {
       // Cancel alarm if reminder was removed
-      await alarmService.cancelNoteReminder(note.id);
+      await alarmService.cancelNoteReminder(noteToSave.id);
+    }
+
+    if (noteToSave.categoryId) {
+      await this.setLastUsedCategoryId(noteToSave.categoryId);
     }
 
     // Trigger WebDAV sync for this note's category
-    this.debouncedWebDAVSync(note.categoryId);
+    this.debouncedWebDAVSync(noteToSave.categoryId);
   }
 
   async deleteNote(id: string): Promise<void> {
@@ -413,15 +486,14 @@ class StorageService {
         await alarmService.cancelNoteReminder(note.id);
       }
 
-      // Soft delete: mark as deleted and clear all content
+      // Soft delete: keep original note payload, only mark deleted state.
       note.deleted = true;
       note.deletedAt = Date.now();
-      note.content = '';
-      note.title = '';
-      note.url = '';
-      note.urlMatchType = 'exact';
       const categoryId = note.categoryId;
-      note.categoryId = null;
+      note.updatedAt = Date.now();
+      note.version = this.getNextNoteVersion(note, note.version);
+      note.hardDeleted = false;
+      note.hardDeletedAt = undefined;
       note.hasReminder = false;
       note.scheduleType = undefined;
       note.scheduledTime = undefined;
@@ -438,15 +510,46 @@ class StorageService {
 
   async permanentlyDeleteNote(id: string): Promise<void> {
     const notes = await this.getAllNotesIncludingDeleted();
-    const note = notes.find(n => n.id === id);
-    const categoryId = note?.categoryId;
-    const filtered = notes.filter((n) => n.id !== id);
-    
-    // Write to local storage
-    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: filtered });
+    const note = notes.find((n) => n.id === id);
+    if (!note) return;
 
-    // Trigger WebDAV sync
+    const categoryId = note.categoryId;
+    note.deleted = true;
+    note.deletedAt = note.deletedAt || Date.now();
+    note.hardDeleted = true;
+    note.hardDeletedAt = Date.now();
+    note.updatedAt = Date.now();
+    note.version = this.getNextNoteVersion(note, note.version);
+    note.title = '';
+    note.content = '';
+    note.url = '';
+    note.urlMatchType = 'exact';
+    note.hasReminder = false;
+    note.scheduleType = undefined;
+    note.scheduledTime = undefined;
+    note.recurringPattern = undefined;
+    note.nextTrigger = undefined;
+
+    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: notes });
     this.debouncedWebDAVSync(categoryId);
+  }
+
+  async restoreNote(id: string): Promise<void> {
+    const notes = await this.getAllNotesIncludingDeleted();
+    const note = notes.find((n) => n.id === id);
+    if (!note || note.deleted !== true || note.hardDeleted === true) {
+      return;
+    }
+
+    note.deleted = false;
+    note.deletedAt = undefined;
+    note.hardDeleted = false;
+    note.hardDeletedAt = undefined;
+    note.updatedAt = Date.now();
+    note.version = this.getNextNoteVersion(note, note.version);
+
+    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: notes });
+    this.debouncedWebDAVSync(note.categoryId);
   }
 
   async getNoteForUrl(url: string): Promise<PageNote | null> {
@@ -540,6 +643,7 @@ class StorageService {
       categoryId: reminder.categoryId,
       createdAt: existingNote?.createdAt || reminder.createdAt,
       updatedAt: Date.now(),
+      version: existingNote?.version,
       hasReminder: true,
       scheduleType: reminder.scheduleType,
       scheduledTime: reminder.scheduledTime,
@@ -719,6 +823,7 @@ class StorageService {
     
     const localSettings: Partial<Settings> = {
       lastDeleteAllTimestamp: settings.lastDeleteAllTimestamp,
+      lastUsedCategoryId: settings.lastUsedCategoryId,
       webdavUsername: settings.webdavUsername,
       webdavPassword: settings.webdavPassword,
       webdavBasePath: settings.webdavBasePath,
@@ -732,6 +837,19 @@ class StorageService {
     
     // Write local settings to local storage (per-device, includes credentials)
     await browser.storage.local.set({ [STORAGE_KEYS.SETTINGS]: localSettings });
+  }
+
+  async getLastUsedCategoryId(): Promise<string | null> {
+    const settings = await this.getSettings();
+    return settings.lastUsedCategoryId || null;
+  }
+
+  async setLastUsedCategoryId(categoryId: string): Promise<void> {
+    if (!categoryId) return;
+    const settings = await this.getSettings();
+    if (settings.lastUsedCategoryId === categoryId) return;
+    settings.lastUsedCategoryId = categoryId;
+    await this.saveSettings(settings);
   }
 
 
@@ -794,41 +912,65 @@ class StorageService {
   // Permanently delete all notes marked as deleted
   async deleteAllTrash(): Promise<void> {
     const notes = await this.getAllNotesIncludingDeleted();
-    const filtered = notes.filter((n) => !n.deleted);
+    const now = Date.now();
+    const affectedCategories = new Set<string>();
+    let converted = 0;
+
+    for (const note of notes) {
+      if (note.deleted !== true || note.hardDeleted === true) {
+        continue;
+      }
+
+      if (note.categoryId) {
+        affectedCategories.add(note.categoryId);
+      }
+
+      note.hardDeleted = true;
+      note.hardDeletedAt = now;
+      note.updatedAt = now;
+      note.version = this.getNextNoteVersion(note, note.version);
+      note.title = '';
+      note.content = '';
+      note.url = '';
+      note.urlMatchType = 'exact';
+      note.hasReminder = false;
+      note.scheduleType = undefined;
+      note.scheduledTime = undefined;
+      note.recurringPattern = undefined;
+      note.nextTrigger = undefined;
+      converted++;
+    }
     
-    // Write to local storage
-    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: filtered });
+    // Persist tombstones so hard-delete can propagate to other devices.
+    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: notes });
 
     // Update lastDeleteAllTimestamp in settings
     const settings = await this.getSettings();
-    settings.lastDeleteAllTimestamp = Date.now();
+    settings.lastDeleteAllTimestamp = now;
     await this.saveSettings(settings);
 
-    console.log(`Permanently deleted all trash. Remaining notes: ${filtered.length}`);
+    affectedCategories.forEach((categoryId) => this.debouncedWebDAVSync(categoryId));
+    console.log(`Converted ${converted} deleted notes to hard-delete tombstones`);
   }
 
-  // Clean up deleted notes older than lastDeleteAllTimestamp (for sync cleanup)
-  async cleanupOldDeletedNotes(): Promise<void> {
-    const settings = await this.getSettings();
-    if (!settings.lastDeleteAllTimestamp) {
-      return; // No cleanup timestamp set yet
-    }
-
+  // Optional GC for old hard-delete tombstones after sufficient propagation time.
+  async cleanupOldHardDeletedTombstones(retentionMs: number = 30 * 24 * 60 * 60 * 1000): Promise<void> {
     const notes = await this.getAllNotesIncludingDeleted();
+    const now = Date.now();
     const filtered = notes.filter((n) => {
-      // Keep non-deleted notes
-      if (!n.deleted) return true;
-      // Remove deleted notes older than lastDeleteAllTimestamp
-      if (n.deletedAt && n.deletedAt < settings.lastDeleteAllTimestamp!) {
-        return false;
+      if (n.hardDeleted !== true) {
+        return true;
       }
-      return true;
+      const hardDeletedAt = n.hardDeletedAt || n.deletedAt || n.updatedAt || n.createdAt || 0;
+      return hardDeletedAt >= now - retentionMs;
     });
 
-    // Write to local storage
-    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: filtered });
+    if (filtered.length === notes.length) {
+      return;
+    }
 
-    console.log(`Cleaned up old deleted notes. Remaining notes: ${filtered.length}`);
+    await browser.storage.local.set({ [STORAGE_KEYS.NOTES]: filtered });
+    console.log(`GC: Removed ${notes.length - filtered.length} old hard-delete tombstones`);
   }
 
   // Compression utilities
@@ -854,6 +996,112 @@ class StorageService {
   // WebDAV Sync Methods
   // ============================================
 
+  private async getWebDAVOutbox(): Promise<WebDAVOutboxState> {
+    const data = await browser.storage.local.get(STORAGE_KEYS.WEBDAV_OUTBOX);
+    const outbox = data[STORAGE_KEYS.WEBDAV_OUTBOX];
+    if (!outbox || typeof outbox !== 'object') {
+      return {};
+    }
+    return outbox as WebDAVOutboxState;
+  }
+
+  private async saveWebDAVOutbox(outbox: WebDAVOutboxState): Promise<void> {
+    await browser.storage.local.set({ [STORAGE_KEYS.WEBDAV_OUTBOX]: outbox });
+    await this.scheduleNextWebDAVRetry(outbox);
+  }
+
+  private async scheduleNextWebDAVRetry(outbox?: WebDAVOutboxState): Promise<void> {
+    if (this.webdavRetryTimer) {
+      clearTimeout(this.webdavRetryTimer);
+      this.webdavRetryTimer = null;
+    }
+
+    const currentOutbox = outbox ?? await this.getWebDAVOutbox();
+    const entries = Object.values(currentOutbox);
+    if (entries.length === 0) {
+      return;
+    }
+
+    const nextAttemptAt = Math.min(...entries.map((entry) => entry.nextAttemptAt));
+    const delay = Math.max(0, nextAttemptAt - Date.now());
+
+    const retryTimer = setTimeout(() => {
+      void this.flushPendingWebDAVSync('retry_timer');
+    }, delay);
+    // In Node/Jest this prevents retry timers from keeping the process alive.
+    (retryTimer as any).unref?.();
+    this.webdavRetryTimer = retryTimer;
+  }
+
+  private async markCategoryDirty(categoryId: string | null | undefined): Promise<void> {
+    if (!categoryId) return;
+
+    const outbox = await this.getWebDAVOutbox();
+    outbox[categoryId] = {
+      categoryId,
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+    };
+    await this.saveWebDAVOutbox(outbox);
+  }
+
+  private async clearCategoryOutbox(categoryId: string): Promise<void> {
+    const outbox = await this.getWebDAVOutbox();
+    if (!outbox[categoryId]) {
+      await this.scheduleNextWebDAVRetry(outbox);
+      return;
+    }
+    delete outbox[categoryId];
+    await this.saveWebDAVOutbox(outbox);
+  }
+
+  private async scheduleCategoryRetry(categoryId: string, errorMessage: string): Promise<void> {
+    const outbox = await this.getWebDAVOutbox();
+    const previous = outbox[categoryId];
+    const attempts = (previous?.attempts || 0) + 1;
+    const delayMs = Math.min(5 * 60 * 1000, 5000 * Math.pow(2, attempts - 1));
+
+    const nextEntry: WebDAVOutboxEntry = {
+      categoryId,
+      attempts,
+      nextAttemptAt: Date.now() + delayMs,
+      lastAttemptAt: Date.now(),
+      lastError: errorMessage,
+    };
+
+    outbox[categoryId] = nextEntry;
+    await this.saveWebDAVOutbox(outbox);
+  }
+
+  public async flushPendingWebDAVSync(reason: string = 'manual'): Promise<void> {
+    const settings = await this.getSettings();
+    if (!settings.webdavEnabled) {
+      return;
+    }
+
+    const outbox = await this.getWebDAVOutbox();
+    const now = Date.now();
+    const dueEntries = Object.values(outbox)
+      .filter((entry) => entry.nextAttemptAt <= now)
+      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt);
+
+    if (dueEntries.length === 0) {
+      await this.scheduleNextWebDAVRetry(outbox);
+      return;
+    }
+
+    console.log('WebDAV: Flushing pending category uploads', {
+      reason,
+      categories: dueEntries.map((entry) => entry.categoryId),
+    });
+
+    for (const entry of dueEntries) {
+      await this.syncCategoryToWebDAV(entry.categoryId);
+    }
+
+    await this.scheduleNextWebDAVRetry();
+  }
+
   // Public method to trigger WebDAV sync from any context (e.g., background script)
   public triggerWebDAVSync(categoryId: string | null | undefined): void {
     this.debouncedWebDAVSync(categoryId);
@@ -870,12 +1118,16 @@ class StorageService {
       this.webdavSyncTimeouts.delete(categoryId);
     }
     
-    // Sync immediately
-    await this.syncCategoryToWebDAV(categoryId);
+    await this.markCategoryDirty(categoryId);
+    await this.flushPendingWebDAVSync('immediate');
   }
 
   private debouncedWebDAVSync(categoryId: string | null | undefined): void {
     if (!categoryId) return;
+
+    void this.markCategoryDirty(categoryId).catch((error) => {
+      console.error('WebDAV: Failed to mark category dirty:', error);
+    });
 
     const existing = this.webdavSyncTimeouts.get(categoryId);
     if (existing) {
@@ -884,21 +1136,26 @@ class StorageService {
 
     const timeout = setTimeout(async () => {
       this.webdavSyncTimeouts.delete(categoryId);
-      await this.syncCategoryToWebDAV(categoryId);
+      await this.flushPendingWebDAVSync('debounced');
     }, 2000);
 
     this.webdavSyncTimeouts.set(categoryId, timeout);
   }
 
-  private async syncCategoryToWebDAV(categoryId: string | null): Promise<void> {
-    if (!categoryId) return;
+  private async syncCategoryToWebDAV(categoryId: string | null): Promise<boolean> {
+    if (!categoryId) return false;
+    if (this.webdavSyncInFlight.has(categoryId)) {
+      return false;
+    }
+    this.webdavSyncInFlight.add(categoryId);
 
     try {
       console.log('WebDAV: Starting push for category', categoryId);
       const settings = await this.getSettings();
       if (!settings.webdavEnabled || !settings.webdavUrl || !settings.webdavUsername || !settings.webdavPassword) {
         console.log('WebDAV: Push skipped - WebDAV not configured');
-        return;
+        await this.scheduleCategoryRetry(categoryId, 'WebDAV not configured');
+        return false;
       }
 
       webdavService.initClient(
@@ -911,13 +1168,15 @@ class StorageService {
       const category = await this.getCategoryById(categoryId);
       if (!category) {
         console.log('WebDAV: Push skipped - category not found', categoryId);
-        return;
+        await this.clearCategoryOutbox(categoryId);
+        return false;
       }
 
       // Skip if category doesn't have WebDAV sync enabled
       if (!category.webdavSync) {
         console.log(`WebDAV: Category "${category.name}" has WebDAV sync disabled, skipping`);
-        return;
+        await this.clearCategoryOutbox(categoryId);
+        return false;
       }
 
       const notes = await this.getAllNotesIncludingDeleted();
@@ -971,9 +1230,16 @@ class StorageService {
       const updatedSettings = await this.getSettings();
       updatedSettings.webdavLastSync = Date.now();
       await this.saveSettings(updatedSettings);
+      await this.clearCategoryOutbox(categoryId);
+      return true;
     } catch (error) {
       console.error('WebDAV push error:', error);
-      await this.saveWebDAVError(error instanceof Error ? error.message : 'Unknown error');
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      await this.scheduleCategoryRetry(categoryId, message);
+      await this.saveWebDAVError(message);
+      return false;
+    } finally {
+      this.webdavSyncInFlight.delete(categoryId);
     }
   }
 
@@ -1105,16 +1371,44 @@ class StorageService {
       if (!existing) {
         mergedMap.set(remoteNote.id, remoteNote);
       } else {
-        const remoteTime = remoteNote.deletedAt || remoteNote.updatedAt || remoteNote.createdAt || 0;
-        const existingTime = existing.deletedAt || existing.updatedAt || existing.createdAt || 0;
-
-        if (remoteTime > existingTime) {
+        if (this.shouldReplaceWithRemote(existing, remoteNote)) {
           mergedMap.set(remoteNote.id, remoteNote);
         }
       }
     }
 
     return Array.from(mergedMap.values());
+  }
+
+  private shouldReplaceWithRemote(localNote: PageNote, remoteNote: PageNote): boolean {
+    const localVersion = localNote.version || 0;
+    const remoteVersion = remoteNote.version || 0;
+
+    if (remoteVersion !== localVersion) {
+      return remoteVersion > localVersion;
+    }
+
+    const localUpdatedAt = localNote.updatedAt || localNote.createdAt || 0;
+    const remoteUpdatedAt = remoteNote.updatedAt || remoteNote.createdAt || 0;
+    if (remoteUpdatedAt !== localUpdatedAt) {
+      return remoteUpdatedAt > localUpdatedAt;
+    }
+
+    const localDeleted = localNote.deleted === true;
+    const remoteDeleted = remoteNote.deleted === true;
+    if (remoteDeleted !== localDeleted) {
+      // If everything else ties, prefer deleted to avoid stale resurrection.
+      return remoteDeleted;
+    }
+
+    const localDeletedAt = localNote.deletedAt || 0;
+    const remoteDeletedAt = remoteNote.deletedAt || 0;
+    if (remoteDeletedAt !== localDeletedAt) {
+      return remoteDeletedAt > localDeletedAt;
+    }
+
+    // Deterministic tie-breaker.
+    return remoteNote.id > localNote.id;
   }
 
   private async syncAllCategoriesFromWebDAV(): Promise<void> {
@@ -1205,10 +1499,12 @@ class StorageService {
     
     this.autoSyncInterval = setInterval(async () => {
       console.log('WebDAV: Auto-sync timer fired, syncing from server...');
+      await this.flushPendingWebDAVSync('auto_sync_interval');
       await this.syncAllCategoriesFromWebDAV();
     }, interval);
 
     console.log('WebDAV: Running initial sync from server...');
+    await this.flushPendingWebDAVSync('auto_sync_initial');
     await this.syncAllCategoriesFromWebDAV();
   }
 
@@ -1217,6 +1513,10 @@ class StorageService {
       console.log('WebDAV: Stopping auto-sync');
       clearInterval(this.autoSyncInterval);
       this.autoSyncInterval = null;
+    }
+    if (this.webdavRetryTimer) {
+      clearTimeout(this.webdavRetryTimer);
+      this.webdavRetryTimer = null;
     }
   }
 

@@ -9,6 +9,21 @@ console.log('TabReminder background script loaded');
 // Track which tabs have already shown overlay for current URL
 const shownOverlays = new Map<number, string>();
 
+async function ensureBackgroundServices(reason: string): Promise<void> {
+  console.log('Background: Ensuring services', reason);
+  await storageService.initialize();
+  await storageService.flushPendingWebDAVSync(`background_${reason}`);
+  if (hasAlarmSupport()) {
+    await alarmService.rescheduleAllReminders();
+  }
+}
+
+// Non-persistent backgrounds can be suspended and restarted often.
+// Run a wake-time initialization so pending sync work is retried quickly.
+void ensureBackgroundServices('wake').catch((error) => {
+  console.error('Background: Wake initialization failed', error);
+});
+
 // Listen for storage changes and trigger WebDAV sync from background context
 // This ensures sync persists even if popup/options page closes
 // Only enabled on desktop (not needed on Android - uses immediate sync)
@@ -61,20 +76,12 @@ if (hasBackgroundSync()) {
 // Initialize extension
 browser.runtime.onInstalled.addListener(async () => {
   console.log('TabReminder installed');
-  await storageService.initialize();
-  
-  // Only reschedule alarms on platforms that support them
-  if (hasAlarmSupport()) {
-    await alarmService.rescheduleAllReminders();
-  }
+  await ensureBackgroundServices('installed');
 });
 
 // Initialize extension services on browser startup
 browser.runtime.onStartup?.addListener(async () => {
-  await storageService.initialize();
-  if (hasAlarmSupport()) {
-    await alarmService.rescheduleAllReminders();
-  }
+  await ensureBackgroundServices('startup');
 });
 
 // Reschedule alarms on supported platforms

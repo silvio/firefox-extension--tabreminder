@@ -73,6 +73,8 @@ function Options() {
   const [categoryError, setCategoryError] = useState('');
   const [deletingCategory, setDeletingCategory] = useState<Category | null>(null);
   const [deletedNotesCount, setDeletedNotesCount] = useState(0);
+  const [deletedNotes, setDeletedNotes] = useState<PageNote[]>([]);
+  const [trashPage, setTrashPage] = useState(0);
   const [deleteAction, setDeleteAction] = useState<'move' | 'remove' | 'delete'>('remove');
   const [targetCategoryId, setTargetCategoryId] = useState('');
   const [deleteFromWebDAV, setDeleteFromWebDAV] = useState(false);
@@ -106,6 +108,7 @@ function Options() {
   // Pagination for Notes with Reminders
   const [reminderNotesPage, setReminderNotesPage] = useState(0);
   const REMINDERS_PER_PAGE = 10;
+  const TRASH_NOTES_PER_PAGE = 10;
 
   useEffect(() => {
     loadSettings();
@@ -519,10 +522,27 @@ function Options() {
 
   async function loadDeletedNotesCount() {
     try {
-      const deletedNotes = await storageService.getDeletedNotes();
-      setDeletedNotesCount(deletedNotes.length);
+      const deletedNotesData = await storageService.getDeletedNotes();
+      const sortedDeleted = deletedNotesData.sort(
+        (a, b) => (b.deletedAt || b.updatedAt || 0) - (a.deletedAt || a.updatedAt || 0)
+      );
+      setDeletedNotes(sortedDeleted);
+      setDeletedNotesCount(sortedDeleted.length);
+      const maxPage = Math.max(0, Math.ceil(sortedDeleted.length / TRASH_NOTES_PER_PAGE) - 1);
+      setTrashPage((prev) => Math.min(prev, maxPage));
     } catch (error) {
       console.error('Error loading deleted notes count:', error);
+    }
+  }
+
+  async function handleRestoreNote(noteId: string) {
+    try {
+      await storageService.restoreNote(noteId);
+      await loadDeletedNotesCount();
+      await loadStats();
+      await loadCategories();
+    } catch (error) {
+      alert('Failed to restore note: ' + (error as Error).message);
     }
   }
 
@@ -536,6 +556,7 @@ function Options() {
       await storageService.deleteAllTrash();
       await loadDeletedNotesCount();
       await loadStats();
+      await loadCategories();
       alert('Trash emptied successfully!');
     } catch (error) {
       alert('Failed to delete trash: ' + (error as Error).message);
@@ -548,11 +569,21 @@ function Options() {
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   }
 
+  function getNotePreview(note: PageNote): string {
+    const trimmed = (note.content || '').trim();
+    if (!trimmed) return '(no content)';
+    if (trimmed.length <= 120) return trimmed;
+    return `${trimmed.slice(0, 117)}...`;
+  }
+
   if (loading || !settings) {
     return <div style={{ padding: '20px' }}>Loading...</div>;
   }
 
   const overlayStyle = settings.notifications.overlayStyle || {};
+  const trashTotalPages = Math.max(1, Math.ceil(deletedNotes.length / TRASH_NOTES_PER_PAGE));
+  const trashStartIndex = trashPage * TRASH_NOTES_PER_PAGE;
+  const pagedTrashNotes = deletedNotes.slice(trashStartIndex, trashStartIndex + TRASH_NOTES_PER_PAGE);
 
   return (
     <div style={{ maxWidth: '600px', margin: '0 auto', padding: '20px' }}>
@@ -2039,6 +2070,89 @@ function Options() {
             </button>
           </div>
         </div>
+
+        {deletedNotesCount > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {pagedTrashNotes.map((note) => (
+              <div
+                key={note.id}
+                style={{
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  padding: '10px',
+                  backgroundColor: '#fff',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: '12px',
+                  alignItems: 'flex-start',
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, marginBottom: '4px', wordBreak: 'break-word' }}>
+                    {note.title || '(untitled)'}
+                  </div>
+                  <div style={{ fontSize: '13px', color: '#666', marginBottom: '4px', wordBreak: 'break-word' }}>
+                    {getNotePreview(note)}
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#999' }}>
+                    Deleted: {new Date(note.deletedAt || note.updatedAt).toLocaleString()}
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleRestoreNote(note.id)}
+                  style={{
+                    padding: '6px 10px',
+                    backgroundColor: '#4caf50',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title="Restore note"
+                >
+                  Restore
+                </button>
+              </div>
+            ))}
+
+            {trashTotalPages > 1 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                <button
+                  onClick={() => setTrashPage((prev) => Math.max(0, prev - 1))}
+                  disabled={trashPage === 0}
+                  style={{
+                    padding: '6px 10px',
+                    backgroundColor: trashPage === 0 ? '#ddd' : '#4a90d9',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: trashPage === 0 ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  Previous
+                </button>
+                <span style={{ fontSize: '12px', color: '#666' }}>
+                  Page {trashPage + 1} of {trashTotalPages}
+                </span>
+                <button
+                  onClick={() => setTrashPage((prev) => Math.min(trashTotalPages - 1, prev + 1))}
+                  disabled={trashPage >= trashTotalPages - 1}
+                  style={{
+                    padding: '6px 10px',
+                    backgroundColor: trashPage >= trashTotalPages - 1 ? '#ddd' : '#4a90d9',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: trashPage >= trashTotalPages - 1 ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       <section>

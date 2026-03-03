@@ -3,14 +3,11 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import browser from 'webextension-polyfill';
 import { storageService } from '../shared/services/storage';
-import { Category, PageNote, ScheduleType, FrequencyType, RecurringPattern, EndCondition } from '../shared/types';
-import { describeRecurringPattern, formatRelativeTime, calculateNextTrigger } from '../shared/utils/timeParser';
+import { Category, PageNote, ScheduleType, FrequencyType, RecurringPattern, EndCondition, Settings } from '../shared/types';
+import { describeRecurringPattern, formatRelativeTime } from '../shared/utils/timeParser';
+import { buildReminderFields } from '../shared/core/reminderFields';
 
 type Tab = 'current' | 'all' | 'edit';
-
-function areRecurringPatternsEqual(a?: RecurringPattern | null, b?: RecurringPattern | null): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-}
 
 function MobileApp() {
   const [currentUrl, setCurrentUrl] = useState('');
@@ -28,6 +25,7 @@ function MobileApp() {
   const [syncing, setSyncing] = useState(false);
   const [editViewMode, setEditViewMode] = useState<'tab' | 'modal'>('tab');
   const [returnTab, setReturnTab] = useState<Tab>('current');
+  const [settings, setSettings] = useState<Settings | null>(null);
 
   // Note form state
   const [noteTitle, setNoteTitle] = useState('');
@@ -82,6 +80,20 @@ function MobileApp() {
     loadData();
   }, []);
 
+  function resolveDefaultCategory(
+    sourceCategories: Category[] = categories,
+    sourceSettings: Settings | null = settings
+  ): string | null {
+    if (
+      sourceSettings?.preselectLastCategory &&
+      sourceSettings.lastUsedCategoryId &&
+      sourceCategories.some((category) => category.id === sourceSettings.lastUsedCategoryId)
+    ) {
+      return sourceSettings.lastUsedCategoryId;
+    }
+    return sourceCategories.length > 0 ? sourceCategories[0].id : null;
+  }
+
   async function loadData() {
     try {
       // First, try to get URL from query parameters (passed from background script)
@@ -115,6 +127,7 @@ function MobileApp() {
       
       setCategories(cats);
       setNotes(allNotes);
+      setSettings(settingsData);
       const configuredMode = settingsData.editViewMode === 'modal' ? 'modal' : 'tab';
       setEditViewMode(configuredMode);
       if (configuredMode !== 'tab' && activeTab === 'edit') {
@@ -127,9 +140,11 @@ function MobileApp() {
         setMatchingNotes(matching);
       }
       
-      // Preselect first category if available
-      if (cats.length > 0 && !noteCategoryId) {
-        setNoteCategoryId(cats[0].id);
+      // Trigger pending WebDAV uploads on mobile wake/load.
+      await storageService.flushPendingWebDAVSync('mobile_load');
+
+      if (!noteCategoryId) {
+        setNoteCategoryId(resolveDefaultCategory(cats, settingsData));
       }
     } catch (error) {
       console.error('Error loading data:', error);
@@ -138,10 +153,18 @@ function MobileApp() {
     }
   }
 
-  function resetForm() {
+  function resetForm(lastUsedCategoryOverride?: string | null) {
     setNoteTitle('');
     setNoteContent('');
-    setNoteCategoryId(categories.length > 0 ? categories[0].id : null);
+    if (
+      lastUsedCategoryOverride &&
+      settings?.preselectLastCategory &&
+      categories.some((category) => category.id === lastUsedCategoryOverride)
+    ) {
+      setNoteCategoryId(lastUsedCategoryOverride);
+    } else {
+      setNoteCategoryId(resolveDefaultCategory());
+    }
     setHasReminder(false);
     setScheduleType('once');
     setReminderDate('');
@@ -259,7 +282,6 @@ function MobileApp() {
     // Build recurring pattern if needed
     let recurringPattern: RecurringPattern | null = null;
     let scheduledTime: number | undefined = undefined;
-    let nextTrigger: number | undefined = undefined;
 
     if (hasReminder && reminderDate && reminderTime) {
       scheduledTime = new Date(`${reminderDate}T${reminderTime}`).getTime();
@@ -302,30 +324,14 @@ function MobileApp() {
       }
     }
 
-    if (hasReminder) {
-      if (scheduleType === 'recurring' && recurringPattern) {
-        nextTrigger = calculateNextTrigger(recurringPattern);
-      } else if (scheduleType === 'once' && scheduledTime) {
-        nextTrigger = scheduledTime;
-      }
-    }
-
-    const reminderUnchanged = Boolean(editingNote) &&
-      Boolean(editingNote?.hasReminder) === hasReminder &&
-      (!hasReminder || (
-        (editingNote?.scheduleType || 'once') === scheduleType &&
-        (
-          scheduleType === 'once'
-            ? (editingNote?.scheduledTime ?? null) === (scheduledTime ?? null)
-            : areRecurringPatternsEqual(editingNote?.recurringPattern ?? null, recurringPattern)
-        )
-      ));
-
-    if (editingNote && reminderUnchanged) {
-      scheduledTime = editingNote.scheduledTime ?? undefined;
-      recurringPattern = editingNote.recurringPattern ?? null;
-      nextTrigger = editingNote.nextTrigger;
-    }
+    const reminderFields = buildReminderFields({
+      editingNote,
+      hasReminder,
+      scheduleType,
+      scheduledTime,
+      recurringPattern,
+      preserveRecurringWithoutPattern: true,
+    });
 
     const note: PageNote = {
       id: editingNote?.id || Date.now().toString(),
@@ -336,11 +342,7 @@ function MobileApp() {
       categoryId: noteCategoryId,
       createdAt: editingNote?.createdAt || Date.now(),
       updatedAt: Date.now(),
-      hasReminder,
-      scheduleType: hasReminder ? scheduleType : undefined,
-      scheduledTime: hasReminder ? scheduledTime : undefined,
-      recurringPattern: hasReminder ? recurringPattern : undefined,
-      nextTrigger: hasReminder ? nextTrigger : undefined,
+      ...reminderFields,
     };
 
     try {
@@ -353,7 +355,7 @@ function MobileApp() {
       
       // Reload data and reset form
       await loadData();
-      resetForm();
+      resetForm(note.categoryId);
       await closeMobileEditorTab();
     } catch (error) {
       console.error('Error saving note:', error);
