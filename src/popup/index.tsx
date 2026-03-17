@@ -256,11 +256,17 @@ function Popup() {
   }
 
   async function persistNoteAndRefresh(note: PageNote): Promise<void> {
+    const oldCategoryId = editingNote?.categoryId ?? null;
+    const categoryChanged = oldCategoryId !== note.categoryId;
     await storageService.saveNote(note);
     // Trigger immediate sync (no debounce) so sync happens even if popup closes immediately.
     if (note.categoryId) {
       await storageService.triggerWebDAVSyncImmediate(note.categoryId);
       setLastUsedCategoryId(note.categoryId);
+    }
+    // Bug 2: sync old category when note was moved away from it
+    if (categoryChanged && oldCategoryId) {
+      await storageService.triggerWebDAVSyncImmediate(oldCategoryId);
     }
     const [updatedNotes, updatedMatchingNotes, updatedReminders] = await Promise.all([
       storageService.getNotes(),
@@ -272,6 +278,10 @@ function Popup() {
     setPageReminders(getPageRemindersFromNotes(updatedMatchingNotes));
     setReminders(updatedReminders);
     browser.runtime.sendMessage({ type: 'NOTE_UPDATED' });
+    // Bug 1: keep the notes-list filter coherent after a category move
+    if (categoryChanged && filterCategory !== 'all' && filterCategory === oldCategoryId) {
+      setFilterCategory(note.categoryId ?? 'all');
+    }
     resetNoteForm();
   }
 
@@ -771,7 +781,7 @@ function CurrentPageTab({
       setRecTimeHour(defaultHour);
       setRecTimeMinute(defaultMinute);
     }
-  }, [editingNote, url, pageTitle, preselectLastCategory, lastUsedCategoryId, categories, savedState.categoryId]);
+  }, [editingNote, url, pageTitle, preselectLastCategory, lastUsedCategoryId, categories]);
 
   useEffect(() => {
     onStateChange({ title, content, urlMatchType, categoryId, matchUrl });
