@@ -6,3 +6,5 @@ dist-android/
 TODO.md
 docs/
 plan*.md
+*.tar.gz
+*.zip
