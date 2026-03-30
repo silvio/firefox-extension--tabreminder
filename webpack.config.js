@@ -1,6 +1,7 @@
 const path = require('path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const CopyPlugin = require('copy-webpack-plugin');
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const webpack = require('webpack');
 const { execSync } = require('child_process');
 
@@ -16,6 +17,8 @@ try {
 
 module.exports = (env, argv) => {
   console.log('Building universal package (desktop + Android)');
+
+  const isProduction = (argv.mode || 'production') === 'production';
 
   // Output directory for universal build
   const outputDir = 'dist';
@@ -49,12 +52,13 @@ module.exports = (env, argv) => {
   ];
 
   return {
-    mode: 'development',
+    mode: argv.mode || 'production',
     devtool: 'source-map',
     entry,
     output: {
       path: path.resolve(__dirname, outputDir),
       filename: '[name]/index.js',
+      globalObject: 'globalThis',
       clean: true,
     },
     module: {
@@ -66,7 +70,7 @@ module.exports = (env, argv) => {
         },
         {
           test: /\.css$/,
-          use: ['style-loader', 'css-loader'],
+          use: [isProduction ? MiniCssExtractPlugin.loader : 'style-loader', 'css-loader'],
         },
       ],
     },
@@ -84,6 +88,7 @@ module.exports = (env, argv) => {
         '__PLATFORM__': JSON.stringify('universal'),
       }),
       ...htmlPlugins,
+      ...(isProduction ? [new MiniCssExtractPlugin({ filename: '[name]/[name].css' })] : []),
       new CopyPlugin({
         patterns: [
           // Copy universal manifest

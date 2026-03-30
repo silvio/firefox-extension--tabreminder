@@ -403,6 +403,7 @@ function Popup() {
             categories={categories}
             preselectLastCategory={settings.preselectLastCategory}
             lastUsedCategoryId={lastUsedCategoryId}
+            recurringPreviewCount={settings.recurringPreviewCount ?? 5}
             editingNote={null}
             savedState={{
               title: popupState.noteTitle,
@@ -478,6 +479,7 @@ function Popup() {
             categories={categories}
             preselectLastCategory={settings.preselectLastCategory}
             lastUsedCategoryId={lastUsedCategoryId}
+            recurringPreviewCount={settings.recurringPreviewCount ?? 5}
             editingNote={editingNote}
             savedState={{
               title: popupState.noteTitle,
@@ -567,6 +569,7 @@ function Popup() {
               categories={categories}
               preselectLastCategory={settings.preselectLastCategory}
               lastUsedCategoryId={lastUsedCategoryId}
+              recurringPreviewCount={settings.recurringPreviewCount ?? 5}
               editingNote={editingNote}
               savedState={{
                 title: popupState.noteTitle,
@@ -661,6 +664,7 @@ interface CurrentPageTabProps {
   onDeleteReminder: (id: string) => void;
   editorOnly?: boolean;
   requireEditingNote?: boolean;
+  recurringPreviewCount?: number;
 }
 
 function CurrentPageTab({
@@ -681,6 +685,7 @@ function CurrentPageTab({
   onDeleteReminder,
   editorOnly = false,
   requireEditingNote = false,
+  recurringPreviewCount = 5,
 }: CurrentPageTabProps) {
   function resolveInitialCategory(): string {
     if (savedState.categoryId) {
@@ -1521,6 +1526,18 @@ function CurrentPageTab({
                 {/* Preview */}
                 <div style={{ marginTop: '8px', padding: '8px', backgroundColor: '#f5f5f5', borderRadius: '4px', fontSize: '11px', color: '#666' }}>
                   📅 {describeRecurringPattern(buildRecurringPattern())}
+                  {recurringPreviewCount > 0 && (() => {
+                    const occurrences = getNextOccurrences(buildRecurringPattern(), recurringPreviewCount);
+                    if (occurrences.length === 0) return null;
+                    return (
+                      <div style={{ marginTop: '6px', borderTop: '1px solid #ddd', paddingTop: '6px' }}>
+                        <div style={{ fontWeight: 600, marginBottom: '4px' }}>Next {occurrences.length} occurrence{occurrences.length !== 1 ? 's' : ''}:</div>
+                        {occurrences.map((ts, i) => (
+                          <div key={i}>{formatDate(new Date(ts))}</div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}

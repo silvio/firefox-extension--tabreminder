@@ -248,6 +248,16 @@ export function calculateNextTrigger(pattern: RecurringPattern, fromDate?: numbe
       if (pattern.dayOfMonth) {
         next.setDate(pattern.dayOfMonth);
       } else if (pattern.weekdayOrdinal) {
+        const candidateCurrent = getNthWeekdayOfMonth(
+          next.getFullYear(),
+          next.getMonth(),
+          pattern.weekdayOrdinal.weekday,
+          pattern.weekdayOrdinal.ordinal
+        );
+        candidateCurrent.setHours(hour, minute, 0, 0);
+        if (candidateCurrent.getTime() > baseDate.getTime()) {
+          return candidateCurrent.getTime();
+        }
         next.setMonth(next.getMonth() + pattern.interval);
         const targetDate = getNthWeekdayOfMonth(
           next.getFullYear(),
@@ -274,6 +284,12 @@ export function calculateNextTrigger(pattern: RecurringPattern, fromDate?: numbe
 }
 
 function getNthWeekdayOfMonth(year: number, month: number, weekday: number, ordinal: number): Date {
+  if (ordinal === 5) {
+    const lastDay = new Date(year, month + 1, 0);
+    const dayOffset = (lastDay.getDay() - weekday + 7) % 7;
+    const targetDay = lastDay.getDate() - dayOffset;
+    return new Date(year, month, targetDay, 9, 0, 0, 0);
+  }
   const firstDay = new Date(year, month, 1);
   let dayOffset = weekday - firstDay.getDay();
   if (dayOffset < 0) dayOffset += 7;

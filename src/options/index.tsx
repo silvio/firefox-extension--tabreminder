@@ -37,12 +37,6 @@ interface Stats {
   storageBytes: number;
 }
 
-interface ImportPreview {
-  notes: number;
-  reminders: number;
-  categories: number;
-  hasSettings: boolean;
-}
 
 function formatRelativeTime(timestamp: number): string {
   const now = Date.now();
@@ -63,8 +57,10 @@ function Options() {
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
-  const [pendingImportData, setPendingImportData] = useState<string | null>(null);
+  const [settingsImportPreview, setSettingsImportPreview] = useState<{ hasSettings: boolean } | null>(null);
+  const [pendingSettingsImport, setPendingSettingsImport] = useState<string | null>(null);
+  const [notesImportPreview, setNotesImportPreview] = useState<{ notes: number; reminders: number; categories: number } | null>(null);
+  const [pendingNotesImport, setPendingNotesImport] = useState<string | null>(null);
   const [customFont, setCustomFont] = useState('');
   const [categories, setCategories] = useState<Category[]>([]);
   const [notes, setNotes] = useState<PageNote[]>([]);
@@ -469,31 +465,25 @@ function Options() {
   }
 
 
-  async function handleExport() {
-    const data = await storageService.exportData();
+  async function handleExportSettings() {
+    const data = await storageService.exportSettings();
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'tabreminder-backup.json';
+    a.download = 'tabreminder-settings.json';
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  function handleImportSelect(event: React.ChangeEvent<HTMLInputElement>) {
+  function handleSettingsImportSelect(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-
     file.text().then((text) => {
       try {
         const data = JSON.parse(text);
-        setImportPreview({
-          notes: data.notes?.length || 0,
-          reminders: data.reminders?.length || 0,
-          categories: data.categories?.length || 0,
-          hasSettings: !!data.settings,
-        });
-        setPendingImportData(text);
+        setSettingsImportPreview({ hasSettings: !!data.settings });
+        setPendingSettingsImport(text);
       } catch {
         alert('Invalid JSON file');
       }
@@ -501,23 +491,70 @@ function Options() {
     event.target.value = '';
   }
 
-  async function handleImportConfirm() {
-    if (!pendingImportData) return;
+  async function handleSettingsImportConfirm() {
+    if (!pendingSettingsImport) return;
     try {
-      await storageService.importData(pendingImportData);
+      await storageService.importSettings(pendingSettingsImport);
       await loadSettings();
-      await loadStats();
-      setImportPreview(null);
-      setPendingImportData(null);
-      alert('Data imported successfully!');
+      setSettingsImportPreview(null);
+      setPendingSettingsImport(null);
+      alert('Settings imported successfully!');
     } catch (error) {
-      alert('Failed to import data: ' + (error as Error).message);
+      alert('Failed to import settings: ' + (error as Error).message);
     }
   }
 
-  function handleImportCancel() {
-    setImportPreview(null);
-    setPendingImportData(null);
+  function handleSettingsImportCancel() {
+    setSettingsImportPreview(null);
+    setPendingSettingsImport(null);
+  }
+
+  async function handleExportNotes() {
+    const data = await storageService.exportNotes();
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'tabreminder-notes.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleNotesImportSelect(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    file.text().then((text) => {
+      try {
+        const data = JSON.parse(text);
+        setNotesImportPreview({
+          notes: data.notes?.length || 0,
+          reminders: data.reminders?.length || 0,
+          categories: data.categories?.length || 0,
+        });
+        setPendingNotesImport(text);
+      } catch {
+        alert('Invalid JSON file');
+      }
+    });
+    event.target.value = '';
+  }
+
+  async function handleNotesImportConfirm() {
+    if (!pendingNotesImport) return;
+    try {
+      await storageService.importNotes(pendingNotesImport);
+      await loadStats();
+      setNotesImportPreview(null);
+      setPendingNotesImport(null);
+      alert('Notes & categories imported successfully!');
+    } catch (error) {
+      alert('Failed to import notes: ' + (error as Error).message);
+    }
+  }
+
+  function handleNotesImportCancel() {
+    setNotesImportPreview(null);
+    setPendingNotesImport(null);
   }
 
   async function loadDeletedNotesCount() {
@@ -1388,6 +1425,25 @@ function Options() {
               Choose how note editing opens in popup and mobile views.
             </div>
           </div>
+          <div>
+            <label style={{ display: 'block', fontWeight: 500, marginBottom: '6px' }}>
+              Recurring preview count
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={settings.recurringPreviewCount ?? 5}
+              onChange={(e) => {
+                const v = Math.min(20, Math.max(1, Number(e.target.value) || 5));
+                setSettings({ ...settings, recurringPreviewCount: v });
+              }}
+              style={{ width: '80px', padding: '8px', border: '1px solid #ddd', borderRadius: '4px' }}
+            />
+            <div style={{ fontSize: '13px', color: '#666', marginTop: '4px' }}>
+              Number of upcoming occurrences shown when editing a recurring reminder (1–20).
+            </div>
+          </div>
         </div>
 
         <button
@@ -1961,81 +2017,63 @@ function Options() {
           Data Management
         </h2>
 
-        <div style={{ display: 'flex', gap: '12px' }}>
-          <button
-            onClick={handleExport}
-            style={{
-              padding: '10px 20px',
-              backgroundColor: '#fff',
-              color: '#333',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              cursor: 'pointer',
-            }}
-          >
-            Export Data
-          </button>
-
-          <label
-            style={{
-              padding: '10px 20px',
-              backgroundColor: '#fff',
-              color: '#333',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              display: 'inline-block',
-            }}
-          >
-            Import Data
-            <input
-              type="file"
-              accept=".json"
-              onChange={handleImportSelect}
-              style={{ display: 'none' }}
-            />
-          </label>
+        <div style={{ marginBottom: '20px' }}>
+          <h3 style={{ fontSize: '15px', marginBottom: '10px' }}>Settings</h3>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <button
+              onClick={handleExportSettings}
+              style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#333', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' }}
+            >
+              Export Settings
+            </button>
+            <label style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#333', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', display: 'inline-block' }}>
+              Import Settings
+              <input type="file" accept=".json" onChange={handleSettingsImportSelect} style={{ display: 'none' }} />
+            </label>
+          </div>
+          {settingsImportPreview && (
+            <div style={{ marginTop: '12px', padding: '16px', backgroundColor: '#fff3cd', borderRadius: '8px', border: '1px solid #ffc107' }}>
+              <div style={{ fontWeight: 600, marginBottom: '8px' }}>📦 Import Preview</div>
+              <div style={{ marginBottom: '10px', fontSize: '14px' }}>
+                <div>⚙️ Settings: {settingsImportPreview.hasSettings ? 'Yes' : 'No'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={handleSettingsImportConfirm} style={{ padding: '8px 16px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Confirm Import</button>
+                <button onClick={handleSettingsImportCancel} style={{ padding: '8px 16px', backgroundColor: '#f44336', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
 
-        {importPreview && (
-          <div style={{ marginTop: '16px', padding: '16px', backgroundColor: '#fff3cd', borderRadius: '8px', border: '1px solid #ffc107' }}>
-            <div style={{ fontWeight: 600, marginBottom: '12px' }}>📦 Import Preview</div>
-            <div style={{ marginBottom: '12px', fontSize: '14px' }}>
-              <div>📝 Notes: {importPreview.notes}</div>
-              <div>⏰ Reminders: {importPreview.reminders}</div>
-              <div>🏷️ Categories: {importPreview.categories}</div>
-              <div>⚙️ Settings: {importPreview.hasSettings ? 'Yes' : 'No'}</div>
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                onClick={handleImportConfirm}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#4caf50',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                }}
-              >
-                Confirm Import
-              </button>
-              <button
-                onClick={handleImportCancel}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#f44336',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-            </div>
+        <div>
+          <h3 style={{ fontSize: '15px', marginBottom: '10px' }}>Notes &amp; Categories</h3>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <button
+              onClick={handleExportNotes}
+              style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#333', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' }}
+            >
+              Export Notes &amp; Categories
+            </button>
+            <label style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#333', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', display: 'inline-block' }}>
+              Import Notes &amp; Categories
+              <input type="file" accept=".json" onChange={handleNotesImportSelect} style={{ display: 'none' }} />
+            </label>
           </div>
-        )}
+          {notesImportPreview && (
+            <div style={{ marginTop: '12px', padding: '16px', backgroundColor: '#fff3cd', borderRadius: '8px', border: '1px solid #ffc107' }}>
+              <div style={{ fontWeight: 600, marginBottom: '8px' }}>📦 Import Preview</div>
+              <div style={{ marginBottom: '10px', fontSize: '14px' }}>
+                <div>📝 Notes: {notesImportPreview.notes}</div>
+                <div>⏰ Reminders: {notesImportPreview.reminders}</div>
+                <div>🏷️ Categories: {notesImportPreview.categories}</div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={handleNotesImportConfirm} style={{ padding: '8px 16px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Confirm Import</button>
+                <button onClick={handleNotesImportCancel} style={{ padding: '8px 16px', backgroundColor: '#f44336', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       <section style={{ marginBottom: '30px' }}>

@@ -889,23 +889,44 @@ class StorageService {
   }
 
   // Import/Export
-  async exportData(): Promise<string> {
-    const data = await this.getAllData();
-    return JSON.stringify(data, null, 2);
+  async exportSettings(): Promise<string> {
+    const settings = await this.getSettings();
+    const { webdavSyncErrors, ...clean } = settings;
+    return JSON.stringify({ settings: clean }, null, 2);
   }
 
-  async importData(jsonString: string): Promise<void> {
-    const data = JSON.parse(jsonString) as StorageData;
-    const storage = this.getStorage('local');
+  async importSettings(jsonString: string): Promise<void> {
+    const data = JSON.parse(jsonString) as { settings?: Settings };
+    if (data.settings) {
+      await this.saveSettings(data.settings);
+    }
+  }
 
+  async exportNotes(): Promise<string> {
+    const [notes, reminders, categories, triggeredReminders] = await Promise.all([
+      this.getNotes(),
+      this.getReminders(),
+      this.getCategories(),
+      this.getTriggeredReminders(),
+    ]);
+    return JSON.stringify({ notes, reminders, categories, triggeredReminders }, null, 2);
+  }
+
+  async importNotes(jsonString: string): Promise<void> {
+    const data = JSON.parse(jsonString) as {
+      notes?: PageNote[];
+      reminders?: TimeReminder[];
+      categories?: Category[];
+      triggeredReminders?: TriggeredReminder[];
+    };
+    const storage = this.getStorage('local');
     await storage.set({
       [STORAGE_KEYS.NOTES]: data.notes || [],
       [STORAGE_KEYS.REMINDERS]: data.reminders || [],
       [STORAGE_KEYS.CATEGORIES]: data.categories || DEFAULT_CATEGORIES,
     });
-
-    if (data.settings) {
-      await this.saveSettings(data.settings);
+    if (data.triggeredReminders) {
+      await storage.set({ [STORAGE_KEYS.TRIGGERED_REMINDERS]: data.triggeredReminders });
     }
   }
 
@@ -983,7 +1004,8 @@ class StorageService {
   }
 
   async getStorageStats(): Promise<{ rawBytes: number; compressedBytes: number }> {
-    const data = await this.exportData();
+    const [settingsData, notesData] = await Promise.all([this.exportSettings(), this.exportNotes()]);
+    const data = settingsData + notesData;
     const rawBytes = new Blob([data]).size;
     const compressed = this.compressData(data);
     const compressedBytes = compressed.length;

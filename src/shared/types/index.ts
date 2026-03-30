@@ -94,6 +94,7 @@ export interface SyncedSettings {
   webdavUrl?: string; // URL syncs so same server on all devices
   webdavEnabled?: boolean; // Enabled state syncs
   categoryColors?: { [categoryId: string]: string }; // Category colors sync across devices
+  recurringPreviewCount?: number; // Number of upcoming occurrences shown in recurring editor
 }
 
 // Settings stored locally only (browser.storage.local)
@@ -175,4 +176,5 @@ export const DEFAULT_SETTINGS: Settings = {
   preselectLastCategory: false,
   popupHeight: 600,
   editViewMode: 'tab',
+  recurringPreviewCount: 5,
 };
