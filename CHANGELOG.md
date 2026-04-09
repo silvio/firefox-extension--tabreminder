@@ -1,9 +1,11 @@
 # Project Changelog
 
+## [1.3.13] - 2026-04-09
+
 ## [1.3.12] - 2026-04-09
 ### Changed
 - Added an `Unreleased` release bucket and repository-local commit guidance so each logical step is committed separately with its matching `CHANGELOG.md` entry.
-- Updated `sync-main.sh` to create branch releases automatically by bumping the patch version, tagging `copilot-v...`, importing the release to `main`, and restoring an empty `Unreleased` section on the source branch while keeping unrelated untracked files out of import commits.
+- Updated `sync-main.sh` to create branch releases automatically by bumping the patch version, tagging `copilot-v...`, importing the release to `main`, building the full Mozilla release artifacts on `main`, tagging the imported release as `v...`, and restoring an empty `Unreleased` section on the source branch while keeping unrelated untracked files out of import commits.
 
 ### Fixed
 - Prevented unsafe WebDAV overwrites from empty never-synced local categories and fixed remote category deletion to target the canonical ID-based JSON filename.

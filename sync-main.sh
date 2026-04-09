@@ -62,8 +62,9 @@ Workflow:
   2. Checkout main
   3. Copy source → main (excluding patterns)
   4. Commit: "import from <source>"
-  5. Merge main → source (traceability)
-  6. On branch sources: restore empty `## [Unreleased]` and commit it on the source branch
+  5. Build release artifacts on main and tag the import commit as "v..."
+  6. Merge main → source (traceability)
+  7. On branch sources: restore empty `## [Unreleased]` and commit it on the source branch
 EOF
 }
 
@@ -300,6 +301,7 @@ plan_release_metadata() {
 	RELEASE_PREPARED=false
 	RELEASE_VERSION=""
 	RELEASE_TAG=""
+	MAIN_RELEASE_TAG=""
 
 	if [ "$IS_BRANCH" != true ]; then
 		return 0
@@ -318,6 +320,7 @@ plan_release_metadata() {
 
 	RELEASE_VERSION=$(increment_patch_version "$CURRENT_VERSION")
 	RELEASE_TAG="copilot-v${RELEASE_VERSION}"
+	MAIN_RELEASE_TAG="v${RELEASE_VERSION}"
 
 	if [ "$CURRENT_VERSION" = "$LATEST_RELEASED_VERSION" ]; then
 		RELEASE_VERSION_REASON="No version bump since last release; patch bump required"
@@ -391,6 +394,8 @@ prepare_release_on_source_branch() {
 	echo -e "  ${BLUE}Current version:${NC} $CURRENT_VERSION"
 	echo -e "  ${BLUE}Last released version:${NC} $LATEST_RELEASED_VERSION"
 	echo -e "  ${BLUE}Next release version:${NC} $RELEASE_VERSION"
+	echo -e "  ${BLUE}Source release tag:${NC} $RELEASE_TAG"
+	echo -e "  ${BLUE}Main release tag:${NC} $MAIN_RELEASE_TAG"
 	echo -e "  ${BLUE}Reason:${NC} $RELEASE_VERSION_REASON"
 
 	if [ "$DRY_RUN" = true ]; then
@@ -407,6 +412,11 @@ prepare_release_on_source_branch() {
 
 	if git rev-parse --verify "$RELEASE_TAG" >/dev/null 2>&1; then
 		echo -e "${RED}Error: Release tag '$RELEASE_TAG' already exists${NC}"
+		exit 1
+	fi
+
+	if git rev-parse --verify "$MAIN_RELEASE_TAG" >/dev/null 2>&1; then
+		echo -e "${RED}Error: Release tag '$MAIN_RELEASE_TAG' already exists${NC}"
 		exit 1
 	fi
 
@@ -432,12 +442,29 @@ prepare_release_on_source_branch() {
 	echo ""
 }
 
+build_release_on_main() {
+	if [ "$IS_BRANCH" != true ] || [ "$RELEASE_PREPARED" != true ]; then
+		return 0
+	fi
+
+	echo -e "${GREEN}Step 6: Build release artifacts on $MAIN_BRANCH and tag $MAIN_RELEASE_TAG${NC}"
+
+	if [ "$DRY_RUN" = true ]; then
+		echo -e "${BLUE}[DRY-RUN]${NC} make release"
+		echo -e "${BLUE}[DRY-RUN]${NC} git tag $MAIN_RELEASE_TAG"
+		return 0
+	fi
+
+	make release
+	git tag "$MAIN_RELEASE_TAG"
+}
+
 reset_changelog_on_source_branch() {
 	if [ "$IS_BRANCH" != true ] || [ "$RELEASE_PREPARED" != true ]; then
 		return 0
 	fi
 
-	echo -e "${GREEN}Step 7: Restore empty [Unreleased] on $SOURCE_REF${NC}"
+	echo -e "${GREEN}Step 8: Restore empty [Unreleased] on $SOURCE_REF${NC}"
 
 	if [ "$DRY_RUN" = true ]; then
 		echo -e "${BLUE}[DRY-RUN]${NC} git checkout $SOURCE_REF"
@@ -501,6 +528,7 @@ echo ""
 RELEASE_PREPARED=false
 RELEASE_VERSION=""
 RELEASE_TAG=""
+MAIN_RELEASE_TAG=""
 CURRENT_VERSION=""
 LATEST_RELEASED_VERSION=""
 RELEASE_VERSION_REASON=""
@@ -509,7 +537,8 @@ plan_release_metadata
 
 if [ "$IS_BRANCH" = true ]; then
 	echo -e "${BLUE}Planned release version:${NC} $RELEASE_VERSION"
-	echo -e "${BLUE}Planned release tag:${NC} $RELEASE_TAG"
+	echo -e "${BLUE}Planned source tag:${NC} $RELEASE_TAG"
+	echo -e "${BLUE}Planned main tag:${NC} $MAIN_RELEASE_TAG"
 	echo ""
 fi
 
@@ -823,13 +852,14 @@ if [ "$AUTO_YES" = false ] && [ "$DRY_RUN" = false ]; then
 		echo "  2. Create release tag: '$RELEASE_TAG'"
 		echo "  3. Make '$MAIN_BRANCH' identical to '$SOURCE_REF' (including deletions)"
 		echo "  4. Create commit: 'import from \"$SOURCE_REF\"'"
+		echo "  5. Run 'make release' on '$MAIN_BRANCH' and create tag '$MAIN_RELEASE_TAG'"
 	else
 		echo "  1. Make '$MAIN_BRANCH' identical to '$SOURCE_REF' (including deletions)"
 		echo "  2. Create commit: 'import from \"$SOURCE_REF\"'"
 	fi
 	if [ "$IS_BRANCH" = true ]; then
-		echo "  5. Merge '$MAIN_BRANCH' back into '$SOURCE_REF' (for traceability)"
-		echo "  6. Commit an empty '[Unreleased]' changelog reset on '$SOURCE_REF'"
+		echo "  6. Merge '$MAIN_BRANCH' back into '$SOURCE_REF' (for traceability)"
+		echo "  7. Commit an empty '[Unreleased]' changelog reset on '$SOURCE_REF'"
 	else
 		echo "  3. Skip merge-back (source is not a branch)"
 	fi
@@ -956,21 +986,24 @@ else
 	echo -e "${BLUE}[DRY-RUN]${NC} git commit -m '$COMMIT_MSG'"
 fi
 
-# Step 6: Merge main back into source branch (only if source is a branch)
+# Step 6: Build release artifacts and tag main release commit
+build_release_on_main
+
+# Step 7: Merge main back into source branch (only if source is a branch)
 if [ "$IS_BRANCH" = true ]; then
-	echo -e "${GREEN}Step 6: Merge $MAIN_BRANCH back into $SOURCE_REF${NC}"
+	echo -e "${GREEN}Step 7: Merge $MAIN_BRANCH back into $SOURCE_REF${NC}"
 	run_cmd git checkout "$SOURCE_REF"
 	run_cmd git merge "$MAIN_BRANCH" -m "Merge $MAIN_BRANCH (import from \"$SOURCE_REF\")"
 else
-	echo -e "${YELLOW}Step 6: Skip merge-back (source is not a branch)${NC}"
+	echo -e "${YELLOW}Step 7: Skip merge-back (source is not a branch)${NC}"
 fi
 
-# Step 7: Reset changelog on source branch for next iteration
+# Step 8: Reset changelog on source branch for next iteration
 reset_changelog_on_source_branch
 
-# Step 8: Return to original branch
+# Step 9: Return to original branch
 if [ "$CURRENT_BRANCH" != "detached" ] && [ "$CURRENT_BRANCH" != "$SOURCE_REF" ]; then
-	echo -e "${GREEN}Step 8: Return to original branch: $CURRENT_BRANCH${NC}"
+	echo -e "${GREEN}Step 9: Return to original branch: $CURRENT_BRANCH${NC}"
 	run_cmd git checkout "$CURRENT_BRANCH"
 fi
 
@@ -989,7 +1022,8 @@ echo "  Source: $SOURCE_REF"
 echo "  Target: $MAIN_BRANCH"
 if [ -n "$RELEASE_VERSION" ]; then
 	echo "  Release: v$RELEASE_VERSION"
-	echo "  Tag: $RELEASE_TAG"
+	echo "  Source tag: $RELEASE_TAG"
+	echo "  Main tag: $MAIN_RELEASE_TAG"
 fi
 echo "  Commit: $COMMIT_MSG"
 echo ""
