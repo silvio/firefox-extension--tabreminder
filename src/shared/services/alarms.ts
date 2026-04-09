@@ -11,6 +11,17 @@ function generateId(): string {
 }
 
 class AlarmService {
+  private async clearAllReminderAlarms(): Promise<void> {
+    if (!hasAlarmSupport()) {
+      return;
+    }
+
+    const alarms = await browser.alarms.getAll();
+    const reminderAlarms = alarms.filter((alarm) => alarm.name.startsWith(ALARM_PREFIX));
+
+    await Promise.all(reminderAlarms.map((alarm) => browser.alarms.clear(alarm.name)));
+  }
+
   private hasTriggeredOccurrence(
     triggeredReminders: TriggeredReminder[],
     reminderId: string,
@@ -80,6 +91,8 @@ class AlarmService {
   }
 
   async rescheduleAllReminders(): Promise<void> {
+    await this.clearAllReminderAlarms();
+
     const notes = await storageService.getNotes();
     const now = Date.now();
 

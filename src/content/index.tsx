@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import browser from 'webextension-polyfill';
 import { PageNote, OverlayStyle, Category } from '../shared/types';
+import { renderMarkdown } from '../shared/utils/markdown';
 
 interface NotesOverlayProps {
   notes: PageNote[];
@@ -77,6 +78,7 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
           {hasReminders && <span style={{ marginLeft: '8px' }}>⏰</span>}
         </strong>
         <button
+          type="button"
           onClick={() => {
             onClose();
             // Fallback: ensure overlay is removed even if onClose fails
@@ -127,6 +129,7 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
               </div>
               <div style={{ display: 'flex', gap: '4px' }}>
                 <button
+                  type="button"
                   onClick={async () => {
                     // Store note ID for editing
                     await browser.storage.local.set({ pendingEditNoteId: note.id });
@@ -149,6 +152,7 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
                 </button>
                 {visibleNotes.length > 1 && (
                   <button
+                    type="button"
                     onClick={() => setDismissed(new Set([...dismissed, note.id]))}
                     style={{
                       background: 'none',
@@ -178,82 +182,6 @@ function NotesOverlay({ notes, categories, style, hasReminders, onClose }: Notes
       })}
     </div>
   );
-}
-
-// Markdown renderer with images and code blocks
-function renderMarkdown(text: string): string {
-  // First handle code blocks and images (before escaping)
-  const codeBlocks: string[] = [];
-  const images: string[] = [];
-
-  // Extract code blocks
-  let processedText = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
-    const langClass = lang ? ` data-lang="${lang}"` : '';
-    const langLabel = lang ? `<div style="font-size:10px;color:#888;margin-bottom:4px">${lang}</div>` : '';
-    codeBlocks.push(
-      `<div style="background:#1e1e1e;padding:8px 12px;border-radius:4px;margin:8px 0;overflow-x:auto">${langLabel}<pre style="margin:0;font-family:monospace;font-size:12px;white-space:pre-wrap"${langClass}>${escapeHtml(code.trim())}</pre></div>`
-    );
-    return placeholder;
-  });
-
-  // Extract images before escaping
-  processedText = processedText.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
-    const placeholder = `__IMAGE_${images.length}__`;
-    images.push(`<img src="${url}" alt="${escapeHtml(alt)}" style="max-width:100%;height:auto;border-radius:4px;margin:4px 0" />`);
-    return placeholder;
-  });
-
-  let html = escapeHtml(processedText);
-
-  // Restore code blocks
-  codeBlocks.forEach((block, i) => {
-    html = html.replace(`__CODE_BLOCK_${i}__`, block);
-  });
-
-  // Restore images
-  images.forEach((img, i) => {
-    html = html.replace(`__IMAGE_${i}__`, img);
-  });
-
-  // Bold: **text** or __text__
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
-
-  // Italic: *text* or _text_
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/_(.+?)_/g, '<em>$1</em>');
-
-  // Inline code: `code`
-  html = html.replace(/`([^`]+)`/g, '<code style="background:#333;padding:2px 4px;border-radius:3px;font-family:monospace">$1</code>');
-
-  // Links: [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:#4a90d9">$1</a>');
-
-  // Headers: # ## ###
-  html = html.replace(/^### (.+)$/gm, '<div style="font-size:14px;font-weight:600;margin:8px 0 4px">$1</div>');
-  html = html.replace(/^## (.+)$/gm, '<div style="font-size:15px;font-weight:600;margin:8px 0 4px">$1</div>');
-  html = html.replace(/^# (.+)$/gm, '<div style="font-size:16px;font-weight:600;margin:8px 0 4px">$1</div>');
-
-  // Blockquote: > text
-  html = html.replace(/^&gt; (.+)$/gm, '<div style="border-left:3px solid #666;padding-left:10px;margin:4px 0;color:#aaa">$1</div>');
-
-  // Lists: - item or * item
-  html = html.replace(/^[-*] (.+)$/gm, '<div style="padding-left:12px">• $1</div>');
-
-  // Numbered lists: 1. item
-  html = html.replace(/^\d+\. (.+)$/gm, '<div style="padding-left:12px">$1</div>');
-
-  return html;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
 }
 
 let root: Root | null = null;

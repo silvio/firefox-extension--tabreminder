@@ -36,6 +36,7 @@ describe('AlarmService', () => {
     browserMock.runtime.sendMessage.mockResolvedValue(undefined);
     browserMock.alarms.create.mockResolvedValue(undefined);
     browserMock.alarms.clear.mockResolvedValue(true);
+    browserMock.alarms.getAll.mockResolvedValue([]);
   });
 
   it('adds triggered reminder for note alarms and sends notification', async () => {
@@ -104,6 +105,29 @@ describe('AlarmService', () => {
 
     expect(addTriggeredSpy).toHaveBeenCalledTimes(1);
     expect(browserMock.alarms.clear).toHaveBeenCalledWith(`reminder_${dueNote.id}`);
+  });
+
+  it('clears existing reminder alarms before rebuilding schedule', async () => {
+    const futureNote = createDueNote({
+      nextTrigger: Date.now() + 60_000,
+      scheduledTime: Date.now() + 60_000,
+    });
+
+    browserMock.alarms.getAll.mockResolvedValue([
+      { name: 'reminder_note_old-note' },
+      { name: 'reminder_legacy-reminder' },
+      { name: 'unrelated_alarm' },
+    ]);
+    jest.spyOn(storageService, 'getNotes').mockResolvedValue([futureNote]);
+
+    await alarmService.rescheduleAllReminders();
+
+    expect(browserMock.alarms.clear).toHaveBeenCalledWith('reminder_note_old-note');
+    expect(browserMock.alarms.clear).toHaveBeenCalledWith('reminder_legacy-reminder');
+    expect(browserMock.alarms.clear).not.toHaveBeenCalledWith('unrelated_alarm');
+    expect(browserMock.alarms.create).toHaveBeenCalledWith(`reminder_note_${futureNote.id}`, {
+      when: futureNote.nextTrigger,
+    });
   });
 
   it('updates badge for each open tab when triggered reminders exist', async () => {

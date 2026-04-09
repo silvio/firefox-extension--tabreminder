@@ -1,5 +1,6 @@
 import { storageService } from '../../src/shared/services/storage';
 import { webdavService } from '../../src/shared/services/webdav';
+import { alarmService } from '../../src/shared/services/alarms';
 import {
   DEFAULT_CATEGORIES,
   DEFAULT_SETTINGS,
@@ -26,13 +27,14 @@ function setupStorageMocks(
   const syncStore: Record<string, unknown> = {
     settings: {
       syncEnabled: DEFAULT_SETTINGS.syncEnabled,
-      notifications: DEFAULT_SETTINGS.notifications,
-      preselectLastCategory: DEFAULT_SETTINGS.preselectLastCategory,
-      popupHeight: DEFAULT_SETTINGS.popupHeight,
-      editViewMode: DEFAULT_SETTINGS.editViewMode,
-      webdavUrl: '',
-      webdavEnabled: false,
-      categoryColors: DEFAULT_SETTINGS.categoryColors,
+        notifications: DEFAULT_SETTINGS.notifications,
+        preselectLastCategory: DEFAULT_SETTINGS.preselectLastCategory,
+        popupHeight: DEFAULT_SETTINGS.popupHeight,
+        editViewMode: DEFAULT_SETTINGS.editViewMode,
+        recurringPreviewCount: DEFAULT_SETTINGS.recurringPreviewCount,
+        webdavUrl: '',
+        webdavEnabled: false,
+        categoryColors: DEFAULT_SETTINGS.categoryColors,
       ...syncStoreOverride.settings as object | undefined,
     },
     ...syncStoreOverride,
@@ -382,6 +384,37 @@ describe('StorageService', () => {
       await storageService.deleteCategory('work');
       expect(browserMock.storage.local.set).toHaveBeenCalled();
     });
+
+    it('deletes the canonical WebDAV file by category id', async () => {
+      const syncedSettings = {
+        syncEnabled: DEFAULT_SETTINGS.syncEnabled,
+        notifications: DEFAULT_SETTINGS.notifications,
+        preselectLastCategory: DEFAULT_SETTINGS.preselectLastCategory,
+        popupHeight: DEFAULT_SETTINGS.popupHeight,
+        editViewMode: DEFAULT_SETTINGS.editViewMode,
+        webdavUrl: 'https://webdav.example.com',
+        webdavEnabled: true,
+        categoryColors: DEFAULT_SETTINGS.categoryColors,
+      };
+
+      setupStorageMocks(
+        {
+          settings: {
+            webdavUsername: 'user',
+            webdavPassword: 'pass',
+            webdavBasePath: '/TabReminder/',
+          },
+          categories: DEFAULT_CATEGORIES,
+        },
+        { settings: syncedSettings }
+      );
+
+      const deleteFileSpy = jest.spyOn(webdavService, 'deleteFile').mockResolvedValue(undefined);
+
+      await storageService.deleteCategory('work', true);
+
+      expect(deleteFileSpy).toHaveBeenCalledWith('tabreminder-work.json');
+    });
   });
 
   describe('settings', () => {
@@ -415,6 +448,7 @@ describe('StorageService', () => {
           preselectLastCategory: newSettings.preselectLastCategory,
           popupHeight: newSettings.popupHeight,
           editViewMode: newSettings.editViewMode,
+          recurringPreviewCount: newSettings.recurringPreviewCount,
           webdavUrl: newSettings.webdavUrl,
           webdavEnabled: newSettings.webdavEnabled,
           categoryColors: newSettings.categoryColors,
@@ -464,6 +498,17 @@ describe('StorageService', () => {
         }),
       });
     });
+
+    it('should return recurringPreviewCount from synced settings', async () => {
+      setupStorageMocks(
+        { settings: {} },
+        { settings: { ...DEFAULT_SETTINGS, recurringPreviewCount: 9 } }
+      );
+
+      const settings = await storageService.getSettings();
+
+      expect(settings.recurringPreviewCount).toBe(9);
+    });
   });
 
   describe('last used category', () => {
@@ -501,6 +546,85 @@ describe('StorageService', () => {
   });
 
   describe('webdav outbox', () => {
+    it('skips force-sync push for an empty category that has never synced successfully', async () => {
+      const syncedSettings = {
+        syncEnabled: DEFAULT_SETTINGS.syncEnabled,
+        notifications: DEFAULT_SETTINGS.notifications,
+        preselectLastCategory: DEFAULT_SETTINGS.preselectLastCategory,
+        popupHeight: DEFAULT_SETTINGS.popupHeight,
+        editViewMode: DEFAULT_SETTINGS.editViewMode,
+        webdavUrl: 'https://webdav.example.com',
+        webdavEnabled: true,
+        categoryColors: DEFAULT_SETTINGS.categoryColors,
+      };
+
+      setupStorageMocks(
+        {
+          settings: {
+            webdavUsername: 'user',
+            webdavPassword: 'pass',
+            webdavBasePath: '/TabReminder/',
+          },
+          categories: [
+            { id: 'work', name: 'Work', color: '#4a90d9', isDefault: true, webdavSync: true },
+          ],
+          notes: [],
+          webdavOutbox: {},
+        },
+        { settings: syncedSettings }
+      );
+
+      const putFileSpy = jest.spyOn(webdavService, 'putFile').mockResolvedValue(undefined);
+      jest.spyOn(webdavService, 'listCategoryFiles').mockResolvedValue([]);
+
+      const result = await storageService.forceSyncAllCategories();
+
+      expect(result.success).toBe(true);
+      expect(putFileSpy).not.toHaveBeenCalled();
+    });
+
+    it('allows push for an empty category after it has synced successfully before', async () => {
+      const syncedSettings = {
+        syncEnabled: DEFAULT_SETTINGS.syncEnabled,
+        notifications: DEFAULT_SETTINGS.notifications,
+        preselectLastCategory: DEFAULT_SETTINGS.preselectLastCategory,
+        popupHeight: DEFAULT_SETTINGS.popupHeight,
+        editViewMode: DEFAULT_SETTINGS.editViewMode,
+        webdavUrl: 'https://webdav.example.com',
+        webdavEnabled: true,
+        categoryColors: DEFAULT_SETTINGS.categoryColors,
+      };
+
+      setupStorageMocks(
+        {
+          settings: {
+            webdavUsername: 'user',
+            webdavPassword: 'pass',
+            webdavBasePath: '/TabReminder/',
+          },
+          categories: [
+            {
+              id: 'work',
+              name: 'Work',
+              color: '#4a90d9',
+              isDefault: true,
+              webdavSync: true,
+              lastSyncTime: Date.now() - 60_000,
+            },
+          ],
+          notes: [],
+          webdavOutbox: {},
+        },
+        { settings: syncedSettings }
+      );
+
+      const putFileSpy = jest.spyOn(webdavService, 'putFile').mockResolvedValue(undefined);
+
+      await storageService.triggerWebDAVSyncImmediate('work');
+
+      expect(putFileSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('persists failed uploads and retries them until success', async () => {
       const syncedSettings = {
         syncEnabled: DEFAULT_SETTINGS.syncEnabled,
@@ -679,6 +803,43 @@ describe('StorageService', () => {
       expect(merged).toHaveLength(1);
       expect(merged[0].deleted).toBe(true);
       expect(merged[0].deletedAt).toBe(2500);
+    });
+  });
+
+  describe('importNotes', () => {
+    it('reschedules alarms and refreshes badge after importing notes', async () => {
+      const rescheduleSpy = jest
+        .spyOn(alarmService, 'rescheduleAllReminders')
+        .mockResolvedValue(undefined);
+      const badgeSpy = jest
+        .spyOn(alarmService, 'updateTriggeredBadge')
+        .mockResolvedValue(undefined);
+
+      const importedNote: PageNote = {
+        id: 'note-1',
+        url: 'https://example.com',
+        urlMatchType: 'exact',
+        title: 'Imported',
+        content: 'Content',
+        categoryId: null,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        hasReminder: true,
+        scheduleType: 'once',
+        scheduledTime: Date.now() + 60_000,
+        nextTrigger: Date.now() + 60_000,
+      };
+
+      await storageService.importNotes(JSON.stringify({ notes: [importedNote] }));
+
+      expect(browserMock.storage.local.set).toHaveBeenCalledWith({
+        notes: [importedNote],
+        reminders: [],
+        categories: DEFAULT_CATEGORIES,
+        triggeredReminders: [],
+      });
+      expect(rescheduleSpy).toHaveBeenCalledTimes(1);
+      expect(badgeSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

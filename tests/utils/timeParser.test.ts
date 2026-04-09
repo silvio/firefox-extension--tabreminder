@@ -2,9 +2,15 @@ import {
   parseTimeInput,
   formatRelativeTime,
   calculateNextTrigger,
+  getNextOccurrences,
 } from '../../src/shared/utils/timeParser';
+import { RecurringPattern } from '../../src/shared/types';
 
 describe('timeParser', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   describe('parseTimeInput', () => {
     it('should parse "now + Xh" format', () => {
       const result = parseTimeInput('now + 2h');
@@ -153,6 +159,188 @@ describe('timeParser', () => {
       const resultDate = new Date(result);
       expect(resultDate.getMonth()).toBe(2); // March
       expect(resultDate.getDate()).toBe(10);
+    });
+  });
+
+  describe('getNextOccurrences', () => {
+    type ExpectedOccurrence = [number, number, number, number, number];
+
+    function expectOccurrencesToMatch(occurrences: number[], expected: Array<[number, number, number, number, number]>) {
+      expect(occurrences).toHaveLength(expected.length);
+
+      expected.forEach(([year, month, day, hour, minute], index) => {
+        const occurrence = new Date(occurrences[index]);
+        expect(occurrence.getFullYear()).toBe(year);
+        expect(occurrence.getMonth()).toBe(month);
+        expect(occurrence.getDate()).toBe(day);
+        expect(occurrence.getHours()).toBe(hour);
+        expect(occurrence.getMinutes()).toBe(minute);
+      });
+    }
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date(2026, 3, 1, 10, 0, 0, 0));
+    });
+
+    it('shows distinct weekly preview entries for multiple weekdays', () => {
+      const occurrences = getNextOccurrences(
+        {
+          frequency: 'weekly',
+          interval: 1,
+          weekdays: [1, 3],
+          endCondition: { type: 'never' },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        5
+      );
+
+      expectOccurrencesToMatch(occurrences, [
+        [2026, 3, 6, 9, 0],
+        [2026, 3, 8, 9, 0],
+        [2026, 3, 13, 9, 0],
+        [2026, 3, 15, 9, 0],
+        [2026, 3, 20, 9, 0],
+      ]);
+    });
+
+    const previewCases: Array<[string, RecurringPattern, number, ExpectedOccurrence[]]> = [
+      [
+        'daily recurrence',
+        {
+          frequency: 'daily',
+          interval: 1,
+          endCondition: { type: 'never' as const },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        3,
+        [
+          [2026, 3, 2, 9, 0],
+          [2026, 3, 3, 9, 0],
+          [2026, 3, 4, 9, 0],
+        ],
+      ],
+      [
+        'weekly single weekday recurrence',
+        {
+          frequency: 'weekly',
+          interval: 1,
+          weekdays: [1],
+          endCondition: { type: 'never' as const },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        3,
+        [
+          [2026, 3, 6, 9, 0],
+          [2026, 3, 13, 9, 0],
+          [2026, 3, 20, 9, 0],
+        ],
+      ],
+      [
+        'weekly multi-weekday recurrence every two weeks',
+        {
+          frequency: 'weekly',
+          interval: 2,
+          weekdays: [1, 3],
+          endCondition: { type: 'never' as const },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        4,
+        [
+          [2026, 3, 13, 9, 0],
+          [2026, 3, 15, 9, 0],
+          [2026, 3, 27, 9, 0],
+          [2026, 3, 29, 9, 0],
+        ],
+      ],
+      [
+        'monthly day-of-month recurrence',
+        {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 15,
+          endCondition: { type: 'never' as const },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        3,
+        [
+          [2026, 3, 15, 9, 0],
+          [2026, 4, 15, 9, 0],
+          [2026, 5, 15, 9, 0],
+        ],
+      ],
+      [
+        'monthly weekday-ordinal recurrence',
+        {
+          frequency: 'monthly',
+          interval: 1,
+          weekdayOrdinal: { weekday: 2, ordinal: 2 },
+          endCondition: { type: 'never' as const },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        3,
+        [
+          [2026, 3, 14, 9, 0],
+          [2026, 4, 12, 9, 0],
+          [2026, 5, 9, 9, 0],
+        ],
+      ],
+      [
+        'yearly recurrence',
+        {
+          frequency: 'yearly',
+          interval: 1,
+          endCondition: { type: 'never' as const },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        3,
+        [
+          [2027, 3, 1, 9, 0],
+          [2028, 3, 1, 9, 0],
+          [2029, 3, 1, 9, 0],
+        ],
+      ],
+    ];
+
+    it.each(previewCases)('returns the expected preview sequence for %s', (_label, pattern, count, expected) => {
+      const occurrences = getNextOccurrences(pattern, count);
+      expectOccurrencesToMatch(occurrences, expected);
+    });
+
+    it('stops at the configured end date', () => {
+      const occurrences = getNextOccurrences(
+        {
+          frequency: 'daily',
+          interval: 1,
+          endCondition: { type: 'date', endDate: new Date(2026, 3, 3, 9, 0, 0, 0).getTime() },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        5
+      );
+
+      expectOccurrencesToMatch(occurrences, [
+        [2026, 3, 2, 9, 0],
+        [2026, 3, 3, 9, 0],
+      ]);
+    });
+
+    it('stops at the configured occurrence count', () => {
+      const occurrences = getNextOccurrences(
+        {
+          frequency: 'weekly',
+          interval: 1,
+          weekdays: [1, 3],
+          endCondition: { type: 'count', occurrences: 3 },
+          timeOfDay: { hour: 9, minute: 0 },
+        },
+        5
+      );
+
+      expectOccurrencesToMatch(occurrences, [
+        [2026, 3, 6, 9, 0],
+        [2026, 3, 8, 9, 0],
+        [2026, 3, 13, 9, 0],
+      ]);
     });
   });
 });

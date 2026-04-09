@@ -31,6 +31,7 @@ const SYNCED_SETTING_KEYS = [
   'preselectLastCategory',
   'popupHeight',
   'editViewMode',
+  'recurringPreviewCount',
   'webdavUrl',
   'webdavEnabled',
   'categoryColors',
@@ -95,6 +96,7 @@ class StorageService {
           preselectLastCategory: oldSettings.preselectLastCategory,
           popupHeight: oldSettings.popupHeight,
           editViewMode: oldSettings.editViewMode,
+          recurringPreviewCount: oldSettings.recurringPreviewCount,
           webdavUrl: oldSettings.webdavUrl,
           webdavEnabled: oldSettings.webdavEnabled
         };
@@ -747,7 +749,7 @@ class StorageService {
             webSettings.webdavPassword,
             webSettings.webdavBasePath || '/TabReminder/'
           );
-          const filename = webdavService.buildFilename(category.name);
+          const filename = webdavService.buildFilename(category.id);
           await webdavService.deleteFile(filename);
         } catch (error) {
           console.error('WebDAV delete file error:', error);
@@ -816,6 +818,7 @@ class StorageService {
       preselectLastCategory: settings.preselectLastCategory,
       popupHeight: normalizedPopupHeight,
       editViewMode: settings.editViewMode === 'modal' ? 'modal' : 'tab',
+      recurringPreviewCount: settings.recurringPreviewCount,
       webdavUrl: settings.webdavUrl,
       webdavEnabled: settings.webdavEnabled,
       categoryColors: settings.categoryColors,
@@ -924,10 +927,11 @@ class StorageService {
       [STORAGE_KEYS.NOTES]: data.notes || [],
       [STORAGE_KEYS.REMINDERS]: data.reminders || [],
       [STORAGE_KEYS.CATEGORIES]: data.categories || DEFAULT_CATEGORIES,
+      [STORAGE_KEYS.TRIGGERED_REMINDERS]: data.triggeredReminders || [],
     });
-    if (data.triggeredReminders) {
-      await storage.set({ [STORAGE_KEYS.TRIGGERED_REMINDERS]: data.triggeredReminders });
-    }
+
+    await alarmService.rescheduleAllReminders();
+    await alarmService.updateTriggeredBadge();
   }
 
   // Permanently delete all notes marked as deleted
@@ -970,7 +974,9 @@ class StorageService {
     settings.lastDeleteAllTimestamp = now;
     await this.saveSettings(settings);
 
-    affectedCategories.forEach((categoryId) => this.debouncedWebDAVSync(categoryId));
+    affectedCategories.forEach((categoryId) => {
+      this.debouncedWebDAVSync(categoryId);
+    });
     console.log(`Converted ${converted} deleted notes to hard-delete tombstones`);
   }
 
@@ -1164,6 +1170,10 @@ class StorageService {
     this.webdavSyncTimeouts.set(categoryId, timeout);
   }
 
+  private shouldSkipUnsafeEmptyCategoryPush(category: Category, categoryNotes: PageNote[]): boolean {
+    return categoryNotes.length === 0 && !category.lastSyncTime;
+  }
+
   private async syncCategoryToWebDAV(categoryId: string | null): Promise<boolean> {
     if (!categoryId) return false;
     if (this.webdavSyncInFlight.has(categoryId)) {
@@ -1203,6 +1213,12 @@ class StorageService {
 
       const notes = await this.getAllNotesIncludingDeleted();
       const categoryNotes = notes.filter(n => n.categoryId === categoryId);
+
+      if (this.shouldSkipUnsafeEmptyCategoryPush(category, categoryNotes)) {
+        console.log(`WebDAV: Skipping push for category "${category.name}" because local state is empty and has never synced successfully`);
+        await this.clearCategoryOutbox(categoryId);
+        return false;
+      }
 
       console.log(`WebDAV: Pushing category "${category.name}" with ${categoryNotes.length} notes (color: ${category.color}, updatedAt: ${category.updatedAt ? new Date(category.updatedAt).toISOString() : 'none'})`);
 

@@ -346,11 +346,17 @@ function MobileApp() {
     };
 
     try {
+      const oldCategoryId = editingNote?.categoryId ?? null;
+      const categoryChanged = oldCategoryId !== note.categoryId;
+
       await storageService.saveNote(note);
       
       // Immediate WebDAV sync
       if (note.categoryId) {
         await storageService.triggerWebDAVSyncImmediate(note.categoryId);
+      }
+      if (categoryChanged && oldCategoryId) {
+        await storageService.triggerWebDAVSyncImmediate(oldCategoryId);
       }
       
       // Reload data and reset form

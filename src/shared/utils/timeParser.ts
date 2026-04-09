@@ -228,25 +228,43 @@ export function calculateNextTrigger(pattern: RecurringPattern, fromDate?: numbe
     }
     case 'weekly': {
       if (pattern.weekdays && pattern.weekdays.length > 0) {
-        const now = new Date();
-        const currentDay = now.getDay();
-        let minDaysUntil = 7 * pattern.interval;
-        for (const day of pattern.weekdays) {
-          let daysUntil = day - currentDay;
-          if (daysUntil <= 0) daysUntil += 7 * pattern.interval;
-          if (daysUntil < minDaysUntil) minDaysUntil = daysUntil;
+        const weekdays = [...pattern.weekdays].sort((a, b) => a - b);
+        let nextOccurrence: number | null = null;
+
+        for (const day of weekdays) {
+          const candidate = new Date(baseDate);
+          candidate.setHours(hour, minute, 0, 0);
+
+          let daysUntil = day - baseDate.getDay();
+          if (daysUntil < 0) {
+            daysUntil += 7 * pattern.interval;
+          }
+
+          candidate.setDate(candidate.getDate() + daysUntil);
+          if (candidate.getTime() <= baseDate.getTime()) {
+            candidate.setDate(candidate.getDate() + 7 * pattern.interval);
+          }
+
+          if (nextOccurrence === null || candidate.getTime() < nextOccurrence) {
+            nextOccurrence = candidate.getTime();
+          }
         }
-        const next = new Date(now);
-        next.setHours(hour, minute, 0, 0);
-        next.setDate(next.getDate() + minDaysUntil);
-        return next.getTime();
+
+        if (nextOccurrence !== null) {
+          return nextOccurrence;
+        }
       }
       return getNextWeekdayTrigger(baseDate.getDay());
     }
     case 'monthly': {
       const next = new Date(baseDate);
       if (pattern.dayOfMonth) {
-        next.setDate(pattern.dayOfMonth);
+        const candidateCurrent = new Date(next);
+        candidateCurrent.setDate(pattern.dayOfMonth);
+        candidateCurrent.setHours(hour, minute, 0, 0);
+        if (candidateCurrent.getTime() > baseDate.getTime()) {
+          return candidateCurrent.getTime();
+        }
       } else if (pattern.weekdayOrdinal) {
         const candidateCurrent = getNthWeekdayOfMonth(
           next.getFullYear(),
@@ -270,6 +288,9 @@ export function calculateNextTrigger(pattern: RecurringPattern, fromDate?: numbe
       }
       next.setHours(hour, minute, 0, 0);
       next.setMonth(next.getMonth() + pattern.interval);
+      if (pattern.dayOfMonth) {
+        next.setDate(pattern.dayOfMonth);
+      }
       return next.getTime();
     }
     case 'yearly': {
