@@ -297,6 +297,115 @@ ensure_changelog_has_unreleased() {
 	fi
 }
 
+extract_changelog_section_from_stream() {
+	local section_name="$1"
+
+	awk -v target="$section_name" '
+		BEGIN { capture = 0; found = 0 }
+		/^## \[/ {
+			if (capture) {
+				exit
+			}
+			if (index($0, "## [" target "]") == 1) {
+				capture = 1
+				found = 1
+			}
+		}
+		capture {
+			print
+		}
+		END {
+			if (!found) {
+				exit 1
+			}
+		}
+	'
+}
+
+extract_changelog_section_from_file() {
+	local section_name="$1"
+	local file_path="$2"
+
+	extract_changelog_section_from_stream "$section_name" <"$file_path"
+}
+
+extract_changelog_section_from_ref() {
+	local section_name="$1"
+	local ref="$2"
+
+	git show "${ref}:CHANGELOG.md" | extract_changelog_section_from_stream "$section_name"
+}
+
+section_has_meaningful_content() {
+	local section_text="$1"
+
+	printf '%s\n' "$section_text" | awk '
+		NR == 1 { next }
+		/^[[:space:]]*$/ { next }
+		/^### / { next }
+		{ found = 1; exit 0 }
+		END { exit found ? 0 : 1 }
+	'
+}
+
+get_release_tag_for_version() {
+	local version="$1"
+	local copilot_tag="copilot-v${version}"
+	local plain_tag="v${version}"
+
+	if git rev-parse --verify "$copilot_tag" >/dev/null 2>&1; then
+		echo "$copilot_tag"
+		return 0
+	fi
+
+	if git rev-parse --verify "$plain_tag" >/dev/null 2>&1; then
+		echo "$plain_tag"
+		return 0
+	fi
+
+	return 1
+}
+
+ensure_unreleased_has_content() {
+	local unreleased_section
+	unreleased_section=$(extract_changelog_section_from_file "Unreleased" CHANGELOG.md)
+
+	if ! section_has_meaningful_content "$unreleased_section"; then
+		echo -e "${RED}Error: CHANGELOG.md is not release-ready because '## [Unreleased]' is empty${NC}"
+		echo -e "${YELLOW}Move the upcoming release notes under '## [Unreleased]' before running sync-main.sh.${NC}"
+		exit 1
+	fi
+}
+
+ensure_latest_released_section_matches_tag() {
+	local latest_version="$1"
+	local release_tag current_section tagged_section
+
+	if [ -z "$latest_version" ]; then
+		return 0
+	fi
+
+	if ! release_tag=$(get_release_tag_for_version "$latest_version"); then
+		echo -e "${RED}Error: Could not find a release tag for CHANGELOG version '$latest_version'${NC}"
+		echo -e "${YELLOW}Expected one of: copilot-v${latest_version} or v${latest_version}.${NC}"
+		exit 1
+	fi
+
+	current_section=$(extract_changelog_section_from_file "$latest_version" CHANGELOG.md)
+	tagged_section=$(extract_changelog_section_from_ref "$latest_version" "$release_tag")
+
+	if [ "$current_section" != "$tagged_section" ]; then
+		echo -e "${RED}Error: Latest released CHANGELOG section '$latest_version' no longer matches tag '$release_tag'${NC}"
+		echo -e "${YELLOW}Move new notes into '## [Unreleased]' and leave released sections unchanged before running sync-main.sh.${NC}"
+		exit 1
+	fi
+}
+
+validate_changelog_release_readiness() {
+	ensure_unreleased_has_content
+	ensure_latest_released_section_matches_tag "$LATEST_RELEASED_VERSION"
+}
+
 plan_release_metadata() {
 	RELEASE_PREPARED=false
 	RELEASE_VERSION=""
@@ -317,6 +426,8 @@ plan_release_metadata() {
 		echo -e "${RED}Error: Could not determine latest released version from CHANGELOG.md${NC}"
 		exit 1
 	fi
+
+	validate_changelog_release_readiness
 
 	RELEASE_VERSION=$(increment_patch_version "$CURRENT_VERSION")
 	RELEASE_TAG="copilot-v${RELEASE_VERSION}"
@@ -433,6 +544,14 @@ prepare_release_on_source_branch() {
 
 	release_date=$(date +%Y-%m-%d)
 	finalize_changelog_release_section "$RELEASE_VERSION" "$release_date"
+
+	local release_section
+	release_section=$(extract_changelog_section_from_file "$RELEASE_VERSION" CHANGELOG.md)
+	if ! section_has_meaningful_content "$release_section"; then
+		echo -e "${RED}Error: Generated release section '$RELEASE_VERSION' is empty${NC}"
+		echo -e "${YELLOW}Populate '## [Unreleased]' with release notes before running sync-main.sh.${NC}"
+		exit 1
+	fi
 
 	git add CHANGELOG.md package.json public/manifest.json package-lock.json
 	git commit -m "release v$RELEASE_VERSION"

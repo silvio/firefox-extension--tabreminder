@@ -9,7 +9,7 @@ import { storageService } from '../shared/services/storage';
 import { alarmService } from '../shared/services/alarms';
 import { PageNote, TimeReminder, Category, UrlMatchType, TriggeredReminder, RecurringPattern, FrequencyType, EndCondition, ScheduleType } from '../shared/types';
 import { createNote, createReminder, getUrlMatchPreview } from '../shared/utils/helpers';
-import { parseTimeInput, formatDate, formatRelativeTime, getNextOccurrences, describeRecurringPattern } from '../shared/utils/timeParser';
+import { parseTimeInput, formatDate, formatDateWithYear, formatRelativeTime, getNextOccurrences, describeRecurringPattern } from '../shared/utils/timeParser';
 import { usePopupState } from '../shared/hooks/usePopupState';
 import { buildReminderFields } from '../shared/core/reminderFields';
 
@@ -1533,7 +1533,7 @@ function CurrentPageTab({
                       <div style={{ marginTop: '6px', borderTop: '1px solid #ddd', paddingTop: '6px' }}>
                         <div style={{ fontWeight: 600, marginBottom: '4px' }}>Next {occurrences.length} occurrence{occurrences.length !== 1 ? 's' : ''}:</div>
                         {occurrences.map((ts, i) => (
-                          <div key={i}>{formatDate(new Date(ts))}</div>
+                          <div key={i}>{formatDateWithYear(new Date(ts))}</div>
                         ))}
                       </div>
                     );

@@ -1,5 +1,11 @@
 # Project Changelog
 
+## [1.3.14] - 2026-04-23
+
+### Fixed
+- Made `sync-main.sh` abort a release when `## [Unreleased]` is empty or when the latest released changelog section no longer matches its release tag, preventing release notes from being filed under the wrong version.
+- Always show the calendar year in recurring occurrence previews in the popup editor so creating or editing recurring reminders makes cross-year schedules unambiguous.
+
 ## [1.3.13] - 2026-04-09
 
 ## [1.3.12] - 2026-04-09

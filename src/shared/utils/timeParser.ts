@@ -347,6 +347,17 @@ export function formatDate(date: Date): string {
   });
 }
 
+export function formatDateWithYear(date: Date): string {
+  return date.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export function formatRelativeTime(timestamp: number): string {
   const now = Date.now();
   const diff = timestamp - now;
